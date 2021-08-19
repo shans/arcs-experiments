@@ -53,3 +53,9 @@ pub struct Module {
 pub struct Graph {
   pub modules: Vec<String>,
 }
+
+#[derive(Debug, PartialEq)]
+pub enum TopLevel {
+  Module(Module),
+  Graph(Graph),
+}

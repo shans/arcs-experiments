@@ -123,6 +123,20 @@ fn graph(i: &str) -> IResult<&str, ast::Graph> {
   ))
 }
 
+fn graph_top_level(i: &str) -> IResult<&str, ast::TopLevel> {
+  let (input, graph) = graph(i)?;
+  Ok((input, ast::TopLevel::Graph(graph)))
+}
+
+fn module_top_level(i: &str) -> IResult<&str, ast::TopLevel> {
+  let (input, module) = module(i)?;
+  Ok((input, ast::TopLevel::Module(module)))
+}
+
+fn top_level(i: &str) -> IResult<&str, ast::TopLevel> {
+  alt((graph_top_level, module_top_level))(i)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -234,24 +248,36 @@ mod tests {
     )
   }
 
-  #[test]
-  fn parse_module() {
-    assert_eq!(
-      module(
+  static TEST_MODULE_STRING : &str = 
 "module TestModule {
   foo: reads writes Int;
 
   foo.onChange: bar <- far;
-}"),
+}";
+
+  fn test_module_result() -> ast::Module {
+    ast::Module {
+      name: String::from("TestModule"),
+      handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int }),
+      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
+        output: String::from("bar"), expression: ast::Expression::ReferenceToState(String::from("far"))
+      }})
+    }
+  }
+
+  static TEST_GRAPH_STRING : &str = "MyModule -> MyModule2 -> AnotherModule";
+  
+  fn test_graph_result() -> ast::Graph {
+    ast::Graph { modules: vec!(String::from("MyModule"), String::from("MyModule2"), String::from("AnotherModule")) }
+  }
+
+  #[test]
+  fn parse_module() {
+    assert_eq!(
+      module(TEST_MODULE_STRING),
       Ok((
         "",
-        ast::Module {
-          name: String::from("TestModule"),
-          handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int }),
-          listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
-            output: String::from("bar"), expression: ast::Expression::ReferenceToState(String::from("far"))
-          }})
-        }
+        test_module_result()
       ))
     )
   }
@@ -259,11 +285,23 @@ mod tests {
   #[test]
   fn parse_graph() {
     assert_eq!(
-      graph("MyModule -> MyModule2 -> AnotherModule"),
+      graph(TEST_GRAPH_STRING),
       Ok((
         "",
-        ast::Graph { modules: vec!(String::from("MyModule"), String::from("MyModule2"), String::from("AnotherModule")) }
+        test_graph_result()
       ))
     )
+  }
+
+  #[test]
+  fn parse_top_level() {
+    assert_eq!(
+      top_level(TEST_MODULE_STRING),
+      Ok(( "", ast::TopLevel::Module(test_module_result()) ))   
+    );
+    assert_eq!(
+      top_level(TEST_GRAPH_STRING),
+      Ok(( "", ast::TopLevel::Graph(test_graph_result()) ))   
+    );
   }
 }
