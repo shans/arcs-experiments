@@ -1,0 +1,15 @@
+module MyModule {
+  foo: reads Int;
+  bar: writes Int;
+
+  foo.onChange: bar <- foo;
+}
+
+module MyModule2 {
+  foo: reads Int;
+  bar: writes Int;
+
+  foo.onChange: bar <- foo;
+}
+
+MyModule -> MyModule2;
