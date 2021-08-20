@@ -137,6 +137,10 @@ fn top_level(i: &str) -> IResult<&str, ast::TopLevel> {
   alt((graph_top_level, module_top_level))(i)
 }
 
+fn top_levels(i: &str) -> IResult<&str, Vec<ast::TopLevel>> {
+  separated_list0(multispace1, top_level)(i)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -303,5 +307,17 @@ mod tests {
       top_level(TEST_GRAPH_STRING),
       Ok(( "", ast::TopLevel::Graph(test_graph_result()) ))   
     );
+  }
+
+  #[test]
+  fn parse_top_levels() {
+    let test_str = TEST_MODULE_STRING.to_string() + "\n\n" + TEST_GRAPH_STRING;
+    assert_eq!(
+      top_levels(&test_str),
+      Ok((
+        "",
+        vec!(ast::TopLevel::Module(test_module_result()), ast::TopLevel::Graph(test_graph_result()))
+      ))
+    )
   }
 }
