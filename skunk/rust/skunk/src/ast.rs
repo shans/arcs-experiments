@@ -17,6 +17,15 @@ pub enum ListenerKind {
   OnWrite
 }
 
+impl ListenerKind {
+  pub fn to_string(&self) -> &str {
+    match self {
+      ListenerKind::OnChange => "OnChange",
+      ListenerKind::OnWrite => "OnWrite"
+    }
+  }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Handle {
   pub name: String,
@@ -47,6 +56,12 @@ pub struct Module {
   pub name: String,
   pub handles: Vec<Handle>,
   pub listeners: Vec<Listener>,
+}
+
+impl Module {
+  pub fn idx_for_field(&self, field: &str) -> Option<usize> {
+    self.handles.iter().position(|handle| handle.name == field)
+  }
 }
 
 #[derive(Debug, PartialEq)]

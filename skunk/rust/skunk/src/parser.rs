@@ -7,7 +7,7 @@ use nom::{
   branch::alt,
   bytes::complete::tag,
   character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1}, 
-  combinator::{verify, map_res},
+  combinator::{verify},
   error::{Error, ErrorKind},
   multi::{separated_list0, separated_list1},
   sequence::tuple,
