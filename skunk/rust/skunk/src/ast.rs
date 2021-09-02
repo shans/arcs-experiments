@@ -62,6 +62,10 @@ impl Module {
   pub fn idx_for_field(&self, field: &str) -> Option<usize> {
     self.handles.iter().position(|handle| handle.name == field)
   }
+
+  pub fn idx_for_bitfield(&self) -> usize {
+    self.handles.len() * 2
+  }
 }
 
 #[derive(Debug, PartialEq)]
