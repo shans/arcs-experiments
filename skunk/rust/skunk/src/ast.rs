@@ -78,3 +78,12 @@ pub enum TopLevel {
   Module(Module),
   Graph(Graph),
 }
+
+pub fn modules<'a>(ast: &'a Vec<TopLevel>) -> Vec<&'a Module> {
+  ast.iter().filter_map(|top_level| {
+    match top_level {
+      TopLevel::Module(m) => Some(m),
+      TopLevel::Graph(_g) => None
+    }
+  }).collect()
+}

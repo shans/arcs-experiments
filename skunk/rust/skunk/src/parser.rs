@@ -137,7 +137,8 @@ fn top_level(i: &str) -> IResult<&str, ast::TopLevel> {
   alt((graph_top_level, module_top_level))(i)
 }
 
-fn top_levels(i: &str) -> IResult<&str, Vec<ast::TopLevel>> {
+// TODO: Make this private, and provide a public wrapper that is nicer
+pub fn top_levels(i: &str) -> IResult<&str, Vec<ast::TopLevel>> {
   separated_list0(multispace1, top_level)(i)
 }
 
