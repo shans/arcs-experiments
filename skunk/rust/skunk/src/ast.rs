@@ -66,6 +66,14 @@ impl Module {
   pub fn idx_for_bitfield(&self) -> usize {
     self.handles.len() * 2
   }
+
+  pub fn outputs(&self) -> Vec<&Handle> {
+    self.handles.iter().filter(|&handle| handle.usages.iter().any(|usage| *usage == Usage::Write)).collect()
+  }
+
+  pub fn inputs(&self) -> Vec<&Handle> {
+    self.handles.iter().filter(|&handle| handle.usages.iter().any(|usage| *usage == Usage::Read)).collect()
+  }
 }
 
 #[derive(Debug, PartialEq)]
@@ -84,6 +92,15 @@ pub fn modules<'a>(ast: &'a Vec<TopLevel>) -> Vec<&'a Module> {
     match top_level {
       TopLevel::Module(m) => Some(m),
       TopLevel::Graph(_g) => None
+    }
+  }).collect()
+}
+
+pub fn graphs<'a>(ast: &'a Vec<TopLevel>) -> Vec<&'a Graph> {
+  ast.iter().filter_map(|top_level| {
+    match top_level {
+      TopLevel::Module(_m) => None,
+      TopLevel::Graph(g) => Some(g)
     }
   }).collect()
 }
