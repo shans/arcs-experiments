@@ -8,19 +8,35 @@ pub struct Handle {
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
-pub enum EndpointType {
-  ModuleEndpoint,
-  ConnectionEndpoint,
-  HandleEndpoint,
+pub enum Endpoint {
+  Module(usize),
+  Connection(usize),
+  Handle(usize)
 }
 
-#[derive(Debug, PartialEq)]
-pub struct Endpoint {
-  pub endpoint_type: EndpointType,
-  pub endpoint_index: usize,
+#[derive(Clone, Copy)]
+pub enum EndpointSpec {
+  Specific(Endpoint),
+  AnyModule,
+  AnyConnection,
+  AnyHandle
 }
 
-// TODO: Endpoints should be an enum directly and this is what the connect function should return
+impl Endpoint {
+  fn matches_spec(&self, spec: EndpointSpec) -> bool {
+    match spec {
+      EndpointSpec::AnyModule => if let Endpoint::Module(_idx) = self { true } else { false }
+      EndpointSpec::AnyConnection => if let Endpoint::Connection(_idx) = self { true } else { false }
+      EndpointSpec::AnyHandle => if let Endpoint::Handle(_idx) = self { true } else { false }
+      EndpointSpec::Specific(endpoint) => *self == endpoint
+    }
+  }
+
+  pub fn module_idx(&self) -> Option<usize> {
+    if let Endpoint::Module(idx) = self { Some(*idx) } else { None }
+  }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Arrow {
   pub from: Endpoint,
@@ -40,61 +56,41 @@ impl Graph {
     Graph { modules: Vec::new(), connections: Vec::new(), handles: Vec::new(), arrows: Vec::new() }
   }
 
-  pub fn add_module(&mut self, module_name: &str) -> usize {
+  pub fn add_module(&mut self, module_name: &str) -> Endpoint {
     self.modules.push(module_name.to_string());
-    self.modules.len() - 1
+    Endpoint::Module(self.modules.len() - 1)
   }
 
-  pub fn add_connection(&mut self, connection_name: &str) -> usize {
+  pub fn add_connection(&mut self, connection_name: &str) -> Endpoint {
     self.connections.push(connection_name.to_string());
-    self.connections.len() - 1
+    Endpoint::Connection(self.connections.len() - 1)
   }
 
-  pub fn add_handle(&mut self, handle_name: &str, handle_type: TypePrimitive) -> usize {
+  pub fn add_handle(&mut self, handle_name: &str, handle_type: TypePrimitive) -> Endpoint {
     self.handles.push(Handle { name: handle_name.to_string(), h_type: handle_type });
-    self.handles.len() - 1
+    Endpoint::Handle(self.handles.len() - 1)
   }
 
-  pub fn connect_module_to_module(&mut self, from_idx: usize, to_idx: usize) -> usize {
-    self.connect(from_idx, EndpointType::ModuleEndpoint, to_idx, EndpointType::ModuleEndpoint)
-  }
-
-  pub fn connect_module_to_connection(&mut self, from_idx: usize, to_idx: usize) -> usize {
-    self.connect(from_idx, EndpointType::ModuleEndpoint, to_idx, EndpointType::ConnectionEndpoint)
-  }
-
-  pub fn connect_connection_to_module(&mut self, from_idx: usize, to_idx: usize) -> usize {
-    self.connect(from_idx, EndpointType::ConnectionEndpoint, to_idx, EndpointType::ModuleEndpoint)
-  }
-
-  pub fn connect_connection_to_handle(&mut self, from_idx: usize, to_idx: usize) -> usize {
-    self.connect(from_idx, EndpointType::ConnectionEndpoint, to_idx, EndpointType::HandleEndpoint)
-  }
-
-  pub fn connect_handle_to_connection(&mut self, from_idx: usize, to_idx: usize) -> usize {
-    self.connect(from_idx, EndpointType::HandleEndpoint, to_idx, EndpointType::ConnectionEndpoint)
-  }
-
-  fn connect(&mut self, from_idx: usize, from_type: EndpointType, to_idx: usize, to_type: EndpointType) -> usize {
-    self.assert_endpoint_is_valid(from_idx, from_type);
-    self.assert_endpoint_is_valid(to_idx, to_type);
-    self.arrows.push(Arrow::new(from_type, from_idx, to_type, to_idx));
+  pub fn connect(&mut self, from: Endpoint, to: Endpoint) -> usize {
+    self.assert_endpoint_is_valid(from);
+    self.assert_endpoint_is_valid(to);
+    self.arrows.push(Arrow::new(from, to));
     self.arrows.len() - 1
   }
 
-  fn assert_endpoint_is_valid(&self, idx: usize, endpoint_type: EndpointType) {
-    match endpoint_type {
-      EndpointType::ModuleEndpoint => assert!(idx < self.modules.len()),
-      EndpointType::ConnectionEndpoint => assert!(idx < self.connections.len()),
-      EndpointType::HandleEndpoint => assert!(idx < self.handles.len())
+  fn assert_endpoint_is_valid(&self, endpoint: Endpoint) {
+    match endpoint {
+      Endpoint::Module(idx) => assert!(idx < self.modules.len()),
+      Endpoint::Connection(idx) => assert!(idx < self.connections.len()),
+      Endpoint::Handle(idx) => assert!(idx < self.handles.len())
     }
   }
 
-  fn filter_module_arrows(&mut self, from_type: EndpointType, to_type: EndpointType) -> Vec<Arrow> {
+  fn filter_module_arrows(&mut self, from_spec: EndpointSpec, to_spec: EndpointSpec) -> Vec<Arrow> {
     let mut remaining = Vec::new();
     let mut returning = Vec::new();
     self.arrows.drain(..).for_each(|arrow| {
-      if arrow.from.endpoint_type == from_type && arrow.to.endpoint_type == to_type {
+      if arrow.from.matches_spec(from_spec) && arrow.to.matches_spec(to_spec) {
         returning.push(arrow);
       } else {
         remaining.push(arrow);
@@ -105,13 +101,13 @@ impl Graph {
   }
 
   pub fn filter_module_to_module_connections(&mut self) -> Vec<Arrow> {
-    self.filter_module_arrows(EndpointType::ModuleEndpoint, EndpointType::ModuleEndpoint)
+    self.filter_module_arrows(EndpointSpec::AnyModule, EndpointSpec::AnyModule)
   }
 }
 
 impl Arrow {
-  pub fn new(from_type: EndpointType, from_idx: usize, to_type: EndpointType, to_idx: usize) -> Arrow {
-    Arrow { from: Endpoint { endpoint_type: from_type, endpoint_index: from_idx }, to: Endpoint { endpoint_type: to_type, endpoint_index: to_idx } }
+  pub fn new(from: Endpoint, to: Endpoint) -> Arrow {
+    Arrow { from, to }
   }
 }
 
@@ -125,17 +121,13 @@ mod tests {
     let m0 = graph.add_module("mod1");
     let m1 = graph.add_module("mod2");
     let c0 = graph.add_connection("c0");
-    graph.connect_module_to_module(m0, m1);
-    graph.connect_module_to_connection(m0, c0);
-    graph.connect_connection_to_module(c0, m1);
+    graph.connect(m0, m1);
+    graph.connect(m0, c0);
+    graph.connect(c0, m1);
     
     let m2m = graph.filter_module_to_module_connections();
 
-    assert_eq!(m2m, vec!(Arrow::new(EndpointType::ModuleEndpoint, m0, EndpointType::ModuleEndpoint, m1)));
-    assert_eq!(graph.arrows, vec!(
-      Arrow::new(EndpointType::ModuleEndpoint, m0, EndpointType::ConnectionEndpoint, c0),
-      Arrow::new(EndpointType::ConnectionEndpoint, c0, EndpointType::ModuleEndpoint, m1)
-    ));
+    assert_eq!(m2m, vec!(Arrow::new(m0, m1)));
+    assert_eq!(graph.arrows, vec!(Arrow::new(m0, c0), Arrow::new(c0, m1)));
   }
-
 } 

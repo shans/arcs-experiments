@@ -17,7 +17,7 @@ pub fn add_graph(graph: &mut graph::Graph, ast: &ast::Graph) {
   
   for i in 1..ast.modules.len() {
     let idx = graph.add_module(&ast.modules[i]);
-    graph.connect_module_to_module(prev_idx, idx);
+    graph.connect(prev_idx, idx);
     prev_idx = idx;
   }
 }
@@ -57,15 +57,17 @@ fn only_matching_connection<'a, 'b>(from_module: &'a ast::Module, to_module: &'b
 
 // TODO: upgrade to Result types and signal error conditions
 fn expand_to_full_connection(modules: &Vec<&ast::Module>, graph: &mut graph::Graph, connection: &graph::Arrow) {
-  let from_module = find_module_by_name(modules, &graph.modules[connection.from.endpoint_index]).unwrap();
-  let to_module = find_module_by_name(modules, &graph.modules[connection.to.endpoint_index]).unwrap();
+  let from_module_idx = connection.from.module_idx().unwrap();
+  let to_module_idx = connection.to.module_idx().unwrap();
+  let from_module = find_module_by_name(modules, &graph.modules[from_module_idx]).unwrap();
+  let to_module = find_module_by_name(modules, &graph.modules[to_module_idx]).unwrap();
   let (from_name, to_name, compatible_type) = only_matching_connection(from_module, to_module);
-  let from_connection_idx = graph.add_connection(from_name);
-  graph.connect_module_to_connection(connection.from.endpoint_index, from_connection_idx);
+  let from_connection = graph.add_connection(from_name);
+  graph.connect(connection.from, from_connection);
   // XXX FIXME XXX
-  let handle_idx = graph.add_handle("h", compatible_type);
-  graph.connect_connection_to_handle(from_connection_idx, handle_idx);
-  let to_connection_idx = graph.add_connection(to_name);
-  graph.connect_handle_to_connection(handle_idx, to_connection_idx);
-  graph.connect_connection_to_module(to_connection_idx, connection.to.endpoint_index);
+  let handle = graph.add_handle("h", compatible_type);
+  graph.connect(from_connection, handle);
+  let to_connection = graph.add_connection(to_name);
+  graph.connect(handle, to_connection);
+  graph.connect(to_connection, connection.to);
 }
