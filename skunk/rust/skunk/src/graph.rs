@@ -130,4 +130,20 @@ mod tests {
     assert_eq!(m2m, vec!(Arrow::new(m0, m1)));
     assert_eq!(graph.arrows, vec!(Arrow::new(m0, c0), Arrow::new(c0, m1)));
   }
+
+  #[test]
+  fn module_spec_matches_any_module() {
+    assert_eq!(Endpoint::Module(0).matches_spec(EndpointSpec::AnyModule), true);
+    assert_eq!(Endpoint::Module(10).matches_spec(EndpointSpec::AnyModule), true);
+    assert_eq!(Endpoint::Handle(0).matches_spec(EndpointSpec::AnyModule), false);
+    assert_eq!(Endpoint::Connection(0).matches_spec(EndpointSpec::AnyModule), false);
+  }
+
+  #[test]
+  fn handle_spec_matches_any_handle() {
+    assert_eq!(Endpoint::Handle(0).matches_spec(EndpointSpec::AnyHandle), true);
+    assert_eq!(Endpoint::Handle(10).matches_spec(EndpointSpec::AnyHandle), true);
+    assert_eq!(Endpoint::Module(0).matches_spec(EndpointSpec::AnyHandle), false);
+    assert_eq!(Endpoint::Connection(0).matches_spec(EndpointSpec::AnyHandle), false);
+  }
 } 

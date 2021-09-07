@@ -26,7 +26,7 @@ fn main() {
   let mut graph = graph_builder::make_graph(ast::graphs(&ast));
   println!("The graph is: {:?}", graph);
 
-  graph_builder::resolve_graph(&ast::modules(&ast), &mut graph);
+  graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
   println!("The graph is: {:?}", graph);
 
   let module = ast::modules(&ast)[0];
