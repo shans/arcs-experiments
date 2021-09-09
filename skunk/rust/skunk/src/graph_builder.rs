@@ -34,7 +34,7 @@ pub fn resolve_graph(modules: &Vec<&ast::Module>, graph: &mut graph::Graph) -> R
   success?; Ok(())
 }
 
-fn find_module_by_name<'a>(modules: &'a Vec<&ast::Module>, name: &str) -> Option<&'a ast::Module> {
+pub fn find_module_by_name<'a>(modules: &'a Vec<&ast::Module>, name: &str) -> Option<&'a ast::Module> {
   modules.iter().find(|&&module| module.name == name).map(|module| *module)
 }
 

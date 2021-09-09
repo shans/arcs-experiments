@@ -3,8 +3,8 @@ use super::ast::TypePrimitive;
 
 #[derive(Debug)]
 pub struct Handle {
-  name: String,
-  h_type: TypePrimitive
+  pub name: String,
+  pub h_type: TypePrimitive
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -34,6 +34,14 @@ impl Endpoint {
 
   pub fn module_idx(&self) -> Option<usize> {
     if let Endpoint::Module(idx) = self { Some(*idx) } else { None }
+  }
+
+  pub fn connection_idx(&self) -> Option<usize> {
+    if let Endpoint::Connection(idx) = self { Some(*idx) } else { None }
+  }
+
+  pub fn handle_idx(&self) -> Option<usize> {
+    if let Endpoint::Handle(idx) = self { Some(*idx) } else { None }
   }
 }
 
@@ -86,7 +94,7 @@ impl Graph {
     }
   }
 
-  fn filter_module_arrows(&mut self, from_spec: EndpointSpec, to_spec: EndpointSpec) -> Vec<Arrow> {
+  fn filter_arrows(&mut self, from_spec: EndpointSpec, to_spec: EndpointSpec) -> Vec<Arrow> {
     let mut remaining = Vec::new();
     let mut returning = Vec::new();
     self.arrows.drain(..).for_each(|arrow| {
@@ -100,8 +108,24 @@ impl Graph {
     returning
   }
 
+  pub fn arrows_matching(&self, from_spec: EndpointSpec, to_spec: EndpointSpec) -> Vec<&Arrow> {
+    self.arrows.iter().filter(|arrow| arrow.from.matches_spec(from_spec) && arrow.to.matches_spec(to_spec)).collect()
+  }
+
+  pub fn arrows_involving_endpoint(&self, endpoint: Endpoint, spec: EndpointSpec) -> Vec<&Arrow> {
+    let mut lhs = self.arrows_matching(EndpointSpec::Specific(endpoint), spec);
+    lhs.append(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)));
+    lhs
+  }
+
+  pub fn endpoints_associated_with_endpoint(&self, endpoint: Endpoint, spec: EndpointSpec) -> Vec<Endpoint> {
+    let lhs = self.arrows_matching(EndpointSpec::Specific(endpoint), spec);
+    let lhs = lhs.iter().map(|endpoint| endpoint.to);
+    lhs.chain(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)).iter().map(|endpoint| endpoint.from)).collect()
+  }
+
   pub fn filter_module_to_module_connections(&mut self) -> Vec<Arrow> {
-    self.filter_module_arrows(EndpointSpec::AnyModule, EndpointSpec::AnyModule)
+    self.filter_arrows(EndpointSpec::AnyModule, EndpointSpec::AnyModule)
   }
 }
 

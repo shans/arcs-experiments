@@ -3,6 +3,7 @@ mod ast;
 mod ir_gen;
 mod graph;
 mod graph_builder;
+mod graph_to_module;
 
 use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple, RelocMode, CodeModel, FileType};
 use inkwell::OptimizationLevel;
@@ -27,7 +28,10 @@ fn main() {
   println!("The graph is: {:?}", graph);
 
   graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
-  println!("The graph is: {:?}", graph);
+  println!("\n\nThe resolved graph is: {:?}", graph);
+
+  let main = graph_to_module::graph_to_module(&graph, &ast::modules(&ast), "Main");
+  println!("\n\nThe constructed main module is {:?}", main);
 
   let module = ast::modules(&ast)[0];
   ir_gen::module_codegen(&cg, &module);

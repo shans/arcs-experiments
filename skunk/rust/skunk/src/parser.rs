@@ -111,6 +111,7 @@ fn module(i: &str) -> IResult<&str, ast::Module> {
       name: name.to_string(),
       handles,
       listeners,
+      submodules: Vec::new(),
     }
   ))
 }
@@ -266,7 +267,8 @@ mod tests {
       handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int }),
       listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
         output: String::from("bar"), expression: ast::Expression::ReferenceToState(String::from("far"))
-      }})
+      }}),
+      submodules: Vec::new(),
     }
   }
 

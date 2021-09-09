@@ -9,7 +9,6 @@ use inkwell::passes::{PassManager, PassManagerBuilder};
 
 use super::ast;
 
-use std::borrow::Borrow;
 use std::convert::TryInto;
 
 pub struct CodegenState<'ctx> {
@@ -210,6 +209,9 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
       let value_ptr = read_ptr_for_field(cg, module, state_ptr.into_pointer_value(), &field)?;
       Ok(cg.builder.build_load(value_ptr, &(String::from("ref_to_state_") + field)))
     }
+    ast::Expression::CopyToSubModule(info) => {
+      panic!("I don't know how to do this yet!");
+    }
   }
 }
 
@@ -227,7 +229,8 @@ mod tests {
                   ),
       listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
         output: String::from("bar"), expression: ast::Expression::ReferenceToState(String::from("far"))
-      }})
+      }}),
+      submodules: Vec::new(),
     }
   }
 
@@ -237,7 +240,8 @@ mod tests {
       handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int }),
       listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
         output: String::from("foo"), expression: ast::Expression::ReferenceToState(String::from("foo"))
-      }})
+      }}),
+      submodules: Vec::new(),
     }
   }
 
@@ -248,7 +252,7 @@ mod tests {
     let cs = CodegenState::new(&context, &target_machine, &target_triple, "TestModule");
     let module = test_module();
     let ir_type = module.ir_type(&cs).into_struct_type();
-    let i64_type = context.borrow().i64_type();
+    let i64_type = context.i64_type();
     assert_eq!(ir_type.count_fields(), 7);
     assert_eq!(ir_type.get_field_types(), &[i64_type.into(); 7]);
   }
