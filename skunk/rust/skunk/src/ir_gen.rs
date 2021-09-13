@@ -1,7 +1,8 @@
-use inkwell::{AddressSpace, IntPredicate};
+use inkwell::{AddressSpace, IntPredicate, OptimizationLevel};
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
+use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::Module;
 use inkwell::targets::{TargetMachine, TargetTriple};
 use inkwell::types::{BasicTypeEnum, AnyTypeEnum};
@@ -41,6 +42,16 @@ impl <'ctx> CodegenState<'ctx> {
     let function_pass_manager = PassManager::create(&module);
     pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
     CodegenState { context, module, builder, function_pass_manager }
+  }
+
+  pub fn new_for_jit(context: &'ctx Context, name: &str) -> (CodegenState<'ctx>, ExecutionEngine<'ctx>) {
+    let module = context.create_module(name);
+    let execution_engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+    let builder = context.create_builder();
+    let pass_manager_builder = PassManagerBuilder::create();
+    let function_pass_manager = PassManager::create(&module);
+    pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
+    (CodegenState { context, module, builder, function_pass_manager }, execution_engine)
   }
 
   fn uint_const(&self, value: u64) -> IntValue {
@@ -397,5 +408,34 @@ mod tests {
     let cs = CodegenState::new(&context, &target_machine, &target_triple, "InvalidModule");
     let module = invalid_module();
     assert_eq!(module_codegen(&cs, &module), Err(CodegenError::BadListenerTrigger))
+  }
+
+  #[repr(C)]
+  pub struct TestModuleState {
+    pub foo: u64,
+    pub foo_upd: u64,
+    pub far: u64,
+    pub far_upd: u64,
+    pub bar: u64,
+    pub bar_upd: u64,
+    pub bitfield: u64
+  }
+  type TestUpdateFunc = unsafe extern "C" fn(*mut TestModuleState) -> ();
+
+  #[test]
+  fn jit_module_codegen_runs() -> CodegenStatus {
+    let context = Context::create();
+    let (cg, ee) = CodegenState::new_for_jit(&context, "TestModule");
+    let module = test_module();
+    module_codegen(&cg, &module)?;
+    unsafe {
+      let function: JitFunction<TestUpdateFunc> = ee.get_function("TestModule_update").unwrap();
+      let mut state = TestModuleState { foo: 0, foo_upd: 10, bar: 0, bar_upd: 0, far: 20, far_upd: 0, bitfield: 0x1 };
+      function.call(&mut state);
+      assert_eq!(state.bitfield, 0x4);
+      assert_eq!(state.bar_upd, 20);
+    }
+
+    Ok(())
   }
 }
