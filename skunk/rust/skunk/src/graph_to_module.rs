@@ -1,3 +1,5 @@
+use std::collections::hash_map::HashMap;
+
 use super::*;
 
 #[derive(Debug)]
@@ -30,9 +32,13 @@ pub struct HandleInfo {
 pub fn graph_to_module(graph: &graph::Graph, modules: &Vec<&ast::Module>, name: &str) -> Result<ast::Module, GraphToModuleError> {
   let module_context = ModuleContext::new(graph, modules)?;
   let mut handle_infos = module_context.generate_handles()?;
+  let mut submodules: Vec<ast::ModuleInfo> = module_context.submodules().drain(..).map(|module| ast::ModuleInfo { module, handle_map: HashMap::new() }).collect();
+  for handle_info in &handle_infos {
+    submodules[handle_info.writes_to_submodule].handle_map.insert(handle_info.submodule_handle.clone(), handle_info.handle.name.clone());
+  }
   let listeners = module_context.generate_listeners(&handle_infos);
   let handles = handle_infos.drain(..).map(|info| info.handle).collect();
-  Ok(ast::Module { name: name.to_string(), handles, listeners, submodules: module_context.submodules() })
+  Ok(ast::Module { name: name.to_string(), handles, listeners, submodules })
 }
 
 pub struct ModuleContext<'a> {

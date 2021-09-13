@@ -1,3 +1,4 @@
+use std::collections::hash_map::HashMap;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Usage {
@@ -70,11 +71,17 @@ pub struct Listener {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct ModuleInfo {
+  pub module: Module,
+  pub handle_map: HashMap<String, String>
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct Module {
   pub name: String,
   pub handles: Vec<Handle>,
   pub listeners: Vec<Listener>,
-  pub submodules: Vec<Module>,
+  pub submodules: Vec<ModuleInfo>,
 }
 
 impl Module {
