@@ -16,7 +16,7 @@ use std::io::prelude::*;
 fn main() {
   let (target_triple, target_machine) = target_triple_and_machine();
   let context = Context::create();
-  let cg = ir_gen::CodegenState::new(&context, &target_machine, &target_triple, "test");
+  //let cg = ir_gen::CodegenState::new(&context, &target_machine, &target_triple, "test");
 
   let mut f = File::open("test.skunk").unwrap();
   let mut buffer = String::new();
@@ -30,17 +30,30 @@ fn main() {
   graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
   println!("\n\nThe resolved graph is: {:?}", graph);
 
-  let main = graph_to_module::graph_to_module(&graph, &ast::modules(&ast), "Main");
+  let main = graph_to_module::graph_to_module(&graph, &ast::modules(&ast), "Main").unwrap();
   println!("\n\nThe constructed main module is {:?}", main);
 
-  let module = ast::modules(&ast)[0];
-  ir_gen::module_codegen(&cg, &module);
+  /*
+  let cg = ir_gen::CodegenState::new(&context, &target_machine, &target_triple, "test");
+  ir_gen::module_codegen(&cg, ast::modules(&ast)[0]).unwrap();
   cg.module.print_to_stderr();
+  */
 
-  let path = Path::new("output.o");
-  target_machine.write_to_file(&cg.module, FileType::Object, path).unwrap();
+  let mut target_info = ir_gen::TargetInfo { target_machine: &target_machine, target_triple: &target_triple };
+  let cg_modules = ir_gen::codegen(&context, &mut target_info, &main).unwrap();
+
+  for module in cg_modules {
+    let name = module.get_name().to_str().unwrap();
+    println!("Outputting object file for {}", name);
+    // module.print_to_stderr();
+    let object_name = name.to_string() + ".o";
+    let path = Path::new(&object_name);
+    target_machine.write_to_file(&module, FileType::Object, path).unwrap();
+  }
+
 }
 
+// TODO: have this return a TargetInfo instead?
 fn target_triple_and_machine() -> (TargetTriple, TargetMachine) {
   Target::initialize_all(&InitializationConfig::default());
 

@@ -23,18 +23,30 @@ impl <'a> ModuleInfo<'a> {
   }
 }
 
+#[derive(Debug)]
+pub struct HandleMappingInfo {
+  pub submodule_idx: usize,
+  pub submodule_handle: String
+}
+
+// Information about a new handle that will exist on the constructed module.
+#[derive(Debug)]
 pub struct HandleInfo {
   pub handle: ast::Handle,
   pub writes_to_submodule: usize,
+  pub mapped_for_submodules: Vec<HandleMappingInfo>,
   pub submodule_handle: String
 }
 
 pub fn graph_to_module(graph: &graph::Graph, modules: &Vec<&ast::Module>, name: &str) -> Result<ast::Module, GraphToModuleError> {
   let module_context = ModuleContext::new(graph, modules)?;
   let mut handle_infos = module_context.generate_handles()?;
+  println!("{:?}", handle_infos);
   let mut submodules: Vec<ast::ModuleInfo> = module_context.submodules().drain(..).map(|module| ast::ModuleInfo { module, handle_map: HashMap::new() }).collect();
   for handle_info in &handle_infos {
-    submodules[handle_info.writes_to_submodule].handle_map.insert(handle_info.submodule_handle.clone(), handle_info.handle.name.clone());
+    for idx in &handle_info.mapped_for_submodules {
+      submodules[idx.submodule_idx].handle_map.insert(idx.submodule_handle.clone(), handle_info.handle.name.clone());
+    }
   }
   let listeners = module_context.generate_listeners(&handle_infos);
   let handles = handle_infos.drain(..).map(|info| info.handle).collect();
@@ -62,9 +74,10 @@ impl <'a> ModuleContext<'a> {
     let connections = self.free_connections();
     for (info, name) in connections {
       let handle = info.module.handle_for_field(&name).ok_or_else(|| GraphToModuleError::NameNotInHandleList(info.module.clone(), name.clone()))?;
+      let mapping_info = HandleMappingInfo { submodule_idx: info.index, submodule_handle: name.clone() };
       let writes_to_submodule = info.index;
       let submodule_handle = name.clone();
-      result.push(HandleInfo { handle: handle.clone(), writes_to_submodule, submodule_handle });
+      result.push(HandleInfo { handle: handle.clone(), writes_to_submodule, mapped_for_submodules: vec!(mapping_info), submodule_handle });
     }
 
     // Additionally, any handles in the graph need to be represented as connections in the top-level module so that the value of the handle can be tracked
@@ -72,6 +85,10 @@ impl <'a> ModuleContext<'a> {
     for (index, handle) in self.graph.handles.iter().enumerate() {
       let candidate_connections = self.graph.endpoints_associated_with_endpoint(graph::Endpoint::Handle(index), graph::EndpointSpec::AnyConnection);
       let mut candidate_found = false;
+
+      let mut mapped_for_submodules = Vec::new();
+      let mut writes_to_submodule = 0;
+      let mut submodule_handle = &"".to_string(); 
       for connection in candidate_connections {
         // We have a connection that connects to the constructed handle. From that we need to fetch the connected module..
         let connection_idx = connection.connection_idx().unwrap();
@@ -81,8 +98,10 @@ impl <'a> ModuleContext<'a> {
         }
         let module = candidate_modules[0];
         // .. retrieve the actual module info from the modules list ..
-        let writes_to_submodule = module.module_idx().unwrap();
-        let submodule_handle = &self.graph.connections[connection_idx];
+        let candidate_writes_to_submodule = module.module_idx().unwrap();
+        let candidate_submodule_handle = &self.graph.connections[connection_idx];
+        // all modules connected in this way participate in the map, collect them here.
+        mapped_for_submodules.push(HandleMappingInfo { submodule_idx: candidate_writes_to_submodule, submodule_handle: candidate_submodule_handle.clone() });
         let submodule_name = &self.graph.modules[writes_to_submodule];
         let submodule = self.find_module_by_name(&submodule_name).ok_or_else(|| GraphToModuleError::NameNotInModuleList(submodule_name.clone()))?;
         let connection_name = &self.graph.connections[connection_idx];
@@ -96,11 +115,15 @@ impl <'a> ModuleContext<'a> {
           // TODO: we don't currently deal with a handle having multiple readers
           panic!("Handle has multiple readers, can't cope");
         }
+        writes_to_submodule = candidate_writes_to_submodule;
+        submodule_handle = candidate_submodule_handle;
         candidate_found = true;
-
-        let new_handle = ast::Handle { name: handle.name.clone(), h_type: handle.h_type, usages: vec!(ast::Usage::Read, ast::Usage::Write) };
-        result.push(HandleInfo { handle: new_handle, writes_to_submodule, submodule_handle: submodule_handle.clone() });
       }
+      if !candidate_found {
+        panic!("Handle has no readers, can't cope");
+      }
+      let new_handle = ast::Handle { name: handle.name.clone(), h_type: handle.h_type, usages: vec!(ast::Usage::Read, ast::Usage::Write) };
+      result.push(HandleInfo { handle: new_handle, writes_to_submodule, mapped_for_submodules, submodule_handle: submodule_handle.clone() });
       // TODO: it's probably an error if there are no readers?
     
     }
