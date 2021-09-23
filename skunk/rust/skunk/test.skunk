@@ -1,15 +1,15 @@
 module MyModule {
   foo: reads Int;
-  bar: writes Int;
+  bar: writes MemRegion;
 
-  foo.onChange: bar <- foo;
+  foo.onChange: bar <- new(foo);
 }
 
 module MyModule2 {
-  foo: reads Int;
+  foo: reads MemRegion;
   bar: writes Int;
 
-  foo.onChange: bar <- foo;
+  foo.onChange: bar <- size(foo);
 }
 
 MyModule -> MyModule2;

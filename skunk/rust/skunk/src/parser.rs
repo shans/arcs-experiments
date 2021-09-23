@@ -7,49 +7,54 @@ use nom::{
   branch::alt,
   bytes::complete::tag,
   character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1}, 
-  combinator::{verify},
-  error::{Error, ErrorKind},
+  combinator::{verify, eof, cut},
+  error::{Error, ErrorKind, VerboseError, VerboseErrorKind},
   multi::{separated_list0, separated_list1},
-  sequence::tuple,
+  sequence::{tuple, delimited, terminated},
 };
+
+// use nom_supreme::error::ErrorTree;
 
 #[inline]
 pub fn is_upper_alphabetic(chr: char) -> bool {
   chr >= 'A' && chr <= 'Z'
 }
 
-fn uppercase_name(i: &str) -> IResult<&str, &str> {
+type ParseResult<'a, T> = IResult<&'a str,T, VerboseError<&'a str>>;
+
+fn uppercase_name(i: &str) -> ParseResult<&str> {
   verify(alphanumeric1, |s: &str| s.len() > 0 && is_upper_alphabetic(s.chars().nth(0).unwrap()))(i)
 }
 
-fn name(i: &str) -> IResult<&str, &str> {
+fn name(i: &str) -> ParseResult<&str> {
   alpha1(i)
 }
 
-fn token<T : Copy>(text: &'static str, result: T) -> impl Fn(&str) -> IResult<&str, T> {
+fn token<T : Copy>(text: &'static str, result: T) -> impl Fn(&str) -> ParseResult<T> {
   move |i: &str| {
     let (input, _) = tag(text)(i)?;
     Ok((input, result))
   }
 }
 
-fn usage_token(i: &str) -> IResult<&str, ast::Usage> {
+fn usage_token(i: &str) -> ParseResult<ast::Usage> {
   let reads = token("reads", ast::Usage::Read);
   let writes = token("writes", ast::Usage::Write);
   alt((reads, writes))(i)
 }
 
-fn usages(i: &str) -> IResult<&str, Vec<ast::Usage>> {
-  separated_list1(multispace1, usage_token)(i)
+fn usages(i: &str) -> ParseResult<Vec<ast::Usage>> {
+  cut(separated_list1(multispace1, usage_token))(i)
 }
 
-fn type_primitive_token(i: &str) -> IResult<&str, ast::TypePrimitive> {
+fn type_primitive_token(i: &str) -> ParseResult<ast::TypePrimitive> {
   let int = token("Int", ast::TypePrimitive::Int);
   let string = token("String", ast::TypePrimitive::String);
-  alt((int, string))(i)
+  let mem_region = token("MemRegion", ast::TypePrimitive::MemRegion);
+  cut(alt((int, string, mem_region)))(i)
 }
 
-fn handle(i: &str) -> IResult<&str, ast::Handle> {
+fn handle(i: &str) -> ParseResult<ast::Handle> {
   let (input, (h_name, _, _, _, h_usages, _, h_type, _, _))
     = tuple((name, multispace0, char(':'), multispace0, usages, multispace1, type_primitive_token, multispace0, char(';')))(i)?;
   Ok((
@@ -62,32 +67,46 @@ fn handle(i: &str) -> IResult<&str, ast::Handle> {
   ))
 }
 
-fn handles(i: &str) -> IResult<&str, Vec<ast::Handle>> {
+fn handles(i: &str) -> ParseResult<Vec<ast::Handle>> {
   separated_list0(multispace1, handle)(i)
 }
 
-fn kind_token(i: &str) -> IResult<&str, ast::ListenerKind> {
+fn kind_token(i: &str) -> ParseResult<ast::ListenerKind> {
   alt((
     token("onChange", ast::ListenerKind::OnChange),
     token("onWrite", ast::ListenerKind::OnWrite),
   ))(i)
 }
 
-fn expression(i: &str) -> IResult<&str, ast::Expression> {
+fn state_reference(i: &str) -> ParseResult<ast::Expression> {
   name(i).map(|(rest, state_elt)| (rest, ast::Expression::ReferenceToState(state_elt.to_string())))
 }
 
-fn statement(i: &str) -> IResult<&str, ast::Statement> {
-  let (input, (output_name, _, _, _, expr)) = tuple((name, multispace0, tag("<-"), multispace0, expression))(i)?;
+fn function(i: &str) -> ParseResult<ast::Expression> {
+  // TODO: multiple arguments
+  let (input, (f_name, _, _, _, f_arg, _, _)) = tuple((name, multispace0, char('('), multispace0, expression, multispace0, char(')')))(i)?;
+  Ok((
+    input,
+    ast::Expression::Function(f_name.to_string(), Box::new(f_arg))
+  ))
+}
+
+fn expression(i: &str) -> ParseResult<ast::Expression> {
+  alt((function, state_reference))(i)
+}
+
+fn statement(i: &str) -> ParseResult<ast::Statement> {
+  let (input, (output_name, _, _, _, expr)) = cut(tuple((name, multispace0, tag("<-"), multispace0, expression)))(i)?;
   Ok((
     input,
     ast::Statement { output: output_name.to_string(), expression: expr }
   ))
 }
 
-fn listener(i: &str) -> IResult<&str, ast::Listener> {
-  let (input, (trigger, _, kind, _, _, _, statement, _, _)) 
-    = tuple((name, char('.'), kind_token, multispace0, char(':'), multispace0, statement, multispace0, char(';')))(i)?;
+fn listener(i: &str) -> ParseResult<ast::Listener> {
+  let (input, (trigger, _, kind, _, (_, _, statement, _, _))) 
+    = tuple((name, char('.'), kind_token, multispace0, 
+        cut(tuple((char(':'), multispace0, statement, multispace0, char(';'))))))(i)?;
   Ok((
     input,
     ast::Listener {
@@ -98,11 +117,11 @@ fn listener(i: &str) -> IResult<&str, ast::Listener> {
   ))
 }
 
-fn listeners(i: &str) -> IResult<&str, Vec<ast::Listener>> {
+fn listeners(i: &str) -> ParseResult<Vec<ast::Listener>> {
   separated_list0(multispace1, listener)(i)
 }
 
-fn module(i: &str) -> IResult<&str, ast::Module> {
+fn module(i: &str) -> ParseResult<ast::Module> {
   let (input, (_, _, name, _, _, _, handles, _, listeners, _, _))
     = tuple((tag("module"), multispace1, uppercase_name, multispace0, char('{'), multispace0, handles, multispace0, listeners, multispace0, char('}')))(i)?;
   Ok((
@@ -116,31 +135,42 @@ fn module(i: &str) -> IResult<&str, ast::Module> {
   ))
 }
 
-fn graph(i: &str) -> IResult<&str, ast::Graph> {
-  let (input, names) = separated_list1(tuple((multispace0, tag("->"), multispace0)), uppercase_name)(i)?;
+fn graph(i: &str) -> ParseResult<ast::Graph> {
+  let (input, names) = terminated(
+    separated_list1(tuple((multispace0, tag("->"), multispace0)), uppercase_name), 
+    tuple((multispace0, char(';')))
+  )(i)?;
   Ok((
     input,
     ast::Graph { modules: names.iter().map(|s| s.to_string()).collect() }
   ))
 }
 
-fn graph_top_level(i: &str) -> IResult<&str, ast::TopLevel> {
+fn graph_top_level(i: &str) -> ParseResult<ast::TopLevel> {
   let (input, graph) = graph(i)?;
   Ok((input, ast::TopLevel::Graph(graph)))
 }
 
-fn module_top_level(i: &str) -> IResult<&str, ast::TopLevel> {
+fn module_top_level(i: &str) -> ParseResult<ast::TopLevel> {
   let (input, module) = module(i)?;
   Ok((input, ast::TopLevel::Module(module)))
 }
 
-fn top_level(i: &str) -> IResult<&str, ast::TopLevel> {
+fn top_level(i: &str) -> ParseResult<ast::TopLevel> {
   alt((graph_top_level, module_top_level))(i)
 }
 
 // TODO: Make this private, and provide a public wrapper that is nicer
-pub fn top_levels(i: &str) -> IResult<&str, Vec<ast::TopLevel>> {
+fn top_levels(i: &str) -> ParseResult<Vec<ast::TopLevel>> {
   separated_list0(multispace1, top_level)(i)
+}
+
+pub fn parse(i: &str) -> ParseResult<Vec<ast::TopLevel>> {
+  let (input, (result, _)) = tuple((
+    delimited(multispace0, top_levels, multispace0),
+    eof
+  ))(i)?;
+  Ok((input, result))
 }
 
 #[cfg(test)]
@@ -157,7 +187,7 @@ mod tests {
     assert_eq!(uppercase_name("Hello2"), Ok(("", "Hello2")));
     assert_eq!(uppercase_name("TesT other"), Ok((" other", "TesT")));
     assert_eq!(uppercase_name("NAmE!other"), Ok(("!other", "NAmE")));
-    assert_eq!(uppercase_name("hello"), mk_error("hello", ErrorKind::Verify));
+    // assert_eq!(uppercase_name("hello"), mk_error("hello", ErrorKind::Verify));
   }
 
   #[test]
@@ -173,6 +203,14 @@ mod tests {
   #[test]
   fn parse_type_primitive() {
     assert_eq!(type_primitive_token("Int"), Ok(("", ast::TypePrimitive::Int)));
+  }
+
+  #[test]
+  fn parse_function() {
+    assert_eq!(
+      function("foo(bar)"), 
+      Ok(("", ast::Expression::Function("foo".to_string(), Box::new(ast::Expression::ReferenceToState("bar".to_string())))))
+    );
   }
 
   #[test]
@@ -258,7 +296,7 @@ mod tests {
 "module TestModule {
   foo: reads writes Int;
 
-  foo.onChange: bar <- far;
+  foo.onChange: bar <- far(la);
 }";
 
   fn test_module_result() -> ast::Module {
@@ -266,13 +304,14 @@ mod tests {
       name: String::from("TestModule"),
       handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int }),
       listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
-        output: String::from("bar"), expression: ast::Expression::ReferenceToState(String::from("far"))
+        output: String::from("bar"),
+        expression: ast::Expression::Function("far".to_string(), Box::new(ast::Expression::ReferenceToState(String::from("la"))))
       }}),
       submodules: Vec::new(),
     }
   }
 
-  static TEST_GRAPH_STRING : &str = "MyModule -> MyModule2 -> AnotherModule";
+  static TEST_GRAPH_STRING : &str = "MyModule -> MyModule2 -> AnotherModule;";
   
   fn test_graph_result() -> ast::Graph {
     ast::Graph { modules: vec!(String::from("MyModule"), String::from("MyModule2"), String::from("AnotherModule")) }

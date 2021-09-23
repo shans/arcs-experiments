@@ -9,7 +9,8 @@ pub enum Usage {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum TypePrimitive {
   Int,
-  String
+  String,
+  MemRegion
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -54,7 +55,8 @@ pub struct CopyTo {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expression {
   ReferenceToState(String),
-  CopyToSubModule(CopyTo)
+  CopyToSubModule(CopyTo),
+  Function(String, Box<Expression>)
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -103,6 +105,10 @@ impl Module {
 
   pub fn handle_for_field(&self, field: &str) -> Option<&Handle> {
     self.handles.iter().find(|handle| handle.name == field)
+  }
+
+  pub fn type_for_field(&self, field: &str) -> Option<TypePrimitive> {
+    Some(self.handle_for_field(field)?.h_type)
   }
 }
 

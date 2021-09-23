@@ -9,6 +9,8 @@ use inkwell::targets::{InitializationConfig, Target, TargetMachine, TargetTriple
 use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 
+use nom::Err;
+
 use std::path::Path;
 use std::fs::File;
 use std::io::prelude::*;
@@ -22,7 +24,16 @@ fn main() {
   let mut buffer = String::new();
   f.read_to_string(&mut buffer).unwrap();
 
-  let (_, ast) = parser::top_levels(&buffer).unwrap();
+  let (remainder, ast) = match parser::parse(&buffer) {
+    Ok(result) => result,
+    Err(Err::Failure(e) | Err::Error(e)) => { 
+      println!("{}", e);
+      return;
+    }
+    Err(Err::Incomplete(_n)) => panic!("Should not be possible")
+  };
+
+  println!("Left over: {}", remainder);
 
   let mut graph = graph_builder::make_graph(ast::graphs(&ast));
   println!("The graph is: {:?}", graph);
@@ -39,7 +50,7 @@ fn main() {
   cg.module.print_to_stderr();
   */
 
-  let mut target_info = ir_gen::TargetInfo { target_machine: &target_machine, target_triple: &target_triple };
+  let mut target_info = ir_gen::codegen_state::TargetInfo { target_machine: &target_machine, target_triple: &target_triple };
   let cg_modules = ir_gen::codegen(&context, &mut target_info, &main).unwrap();
 
   for module in cg_modules {
