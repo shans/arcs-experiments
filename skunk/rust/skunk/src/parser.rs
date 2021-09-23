@@ -5,8 +5,8 @@ use super::ast;
 use nom::{
   IResult,
   branch::alt,
-  bytes::complete::tag,
-  character::complete::{alpha1, alphanumeric1, char, multispace0, multispace1}, 
+  bytes::complete::{tag, is_a},
+  character::complete::{alpha1, char, multispace0, multispace1}, 
   combinator::{verify, eof, cut},
   error::{Error, ErrorKind, VerboseError, VerboseErrorKind},
   multi::{separated_list0, separated_list1},
@@ -20,14 +20,21 @@ pub fn is_upper_alphabetic(chr: char) -> bool {
   chr >= 'A' && chr <= 'Z'
 }
 
+#[inline]
+pub fn is_lower_alphabetic(chr: char) -> bool {
+  chr >= 'a' && chr <= 'z'
+}
+
+static ALLOWED_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+
 type ParseResult<'a, T> = IResult<&'a str,T, VerboseError<&'a str>>;
 
 fn uppercase_name(i: &str) -> ParseResult<&str> {
-  verify(alphanumeric1, |s: &str| s.len() > 0 && is_upper_alphabetic(s.chars().nth(0).unwrap()))(i)
+  verify(is_a(ALLOWED_CHARS), |s: &str| s.len() > 0 && is_upper_alphabetic(s.chars().nth(0).unwrap()))(i)
 }
 
 fn name(i: &str) -> ParseResult<&str> {
-  alpha1(i)
+  verify(is_a(ALLOWED_CHARS), |s: &str| s.len() > 0 && is_lower_alphabetic(s.chars().nth(0).unwrap()))(i)
 }
 
 fn token<T : Copy>(text: &'static str, result: T) -> impl Fn(&str) -> ParseResult<T> {

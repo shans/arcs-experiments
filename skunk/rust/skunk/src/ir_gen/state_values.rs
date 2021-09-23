@@ -81,7 +81,7 @@ impl <'ctx> Loadable<'ctx> for PointerValue<'ctx> {
 impl <'ctx> Loadable<'ctx> for MemRegionPointer<'ctx> {
   fn load(&self, cg: &CodegenState<'ctx>, name: &str) -> CodegenResult<StateValue<'ctx>> {
     let data = cg.builder.build_load(self.data_ptr(cg)?, &(name.to_string() + "_data"));
-    let size = cg.builder.build_load(self.data_ptr(cg)?, &(name.to_string() + "_size"));
+    let size = cg.builder.build_load(self.size_ptr(cg)?, &(name.to_string() + "_size"));
     Ok(StateValue::MemRegion(data, size))
   }
   fn clear(&self, cg: &CodegenState<'ctx>) -> CodegenStatus {

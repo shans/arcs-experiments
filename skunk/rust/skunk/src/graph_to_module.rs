@@ -9,6 +9,7 @@ pub enum GraphToModuleError {
   MultipleModulesForConnection(String)
 }
 
+#[derive(Debug)]
 pub struct ModuleInfo<'a> {
   pub index: usize,
   pub module: &'a ast::Module
@@ -102,7 +103,7 @@ impl <'a> ModuleContext<'a> {
         let candidate_submodule_handle = &self.graph.connections[connection_idx];
         // all modules connected in this way participate in the map, collect them here.
         mapped_for_submodules.push(HandleMappingInfo { submodule_idx: candidate_writes_to_submodule, submodule_handle: candidate_submodule_handle.clone() });
-        let submodule_name = &self.graph.modules[writes_to_submodule];
+        let submodule_name = &self.graph.modules[candidate_writes_to_submodule];
         let submodule = self.find_module_by_name(&submodule_name).ok_or_else(|| GraphToModuleError::NameNotInModuleList(submodule_name.clone()))?;
         let connection_name = &self.graph.connections[connection_idx];
         // .. and make sure that this connection inputs into the module. If so, then the connection we found is going to be

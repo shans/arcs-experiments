@@ -560,5 +560,51 @@ module ModuleWithNew {
       }
     })
   }
+
+  static COPY_MEMREGION_TEST_STRING: &str = "
+module Writer {
+  size_in: reads Int;
+  region: writes MemRegion;
   
+  size_in.onChange: region <- new(size_in);
+}
+
+module Reader {
+  region: reads MemRegion;
+  size_out: writes Int;
+
+  region.onChange: size_out <- size(region);
+}
+
+Writer -> Reader;
+  ";
+
+  state_struct!(Writer, size_in: u64, region: MemRegion);
+  state_struct!(Reader, region: MemRegion, size_out: u64);
+  state_struct!(CopyMemRegionMain, size_in: u64, size_out: u64, h0: MemRegion | writer: WriterState, reader: ReaderState);
+
+  #[test]
+  fn jit_copy_memregion_codegen_runs() -> CodegenStatus {
+    ee_for_string(COPY_MEMREGION_TEST_STRING, |ee: ExecutionEngine| {
+      unsafe {
+        let function: JitFunction<CopyMemRegionMainFunc> = ee.get_function("Main_update").unwrap();  
+        let mut state = CopyMemRegionMainState {
+          size_in: 0, size_in_upd: 50, size_out: 0, size_out_upd: 0, h0: MemRegion::empty(), h0_upd: MemRegion::empty(), bitfield: 0x1,
+          writer: WriterState { size_in: 0, size_in_upd: 0, region: MemRegion::empty(), region_upd: MemRegion::empty(), bitfield: 0},
+          reader: ReaderState { size_out: 0, size_out_upd: 0, region: MemRegion::empty(), region_upd: MemRegion::empty(), bitfield: 0},
+        };
+
+        function.call(&mut state);
+        assert_eq!(state.bitfield, 0x4);
+        assert_eq!(state.h0_upd.size, 50);
+        assert_ne!(state.h0_upd.data, 0);
+
+        function.call(&mut state);
+        assert_eq!(state.bitfield, 0x2);
+        assert_eq!(state.size_out_upd, 50);
+      }
+    })
+  }
+
+
 }
