@@ -8,13 +8,13 @@ use super::ast;
 use std::convert::TryInto;
 
 //
-// Each field in a module's state has a type (currently Integer or MemRegion).
+// Each field in a module's state has a type (currently SingleWordPrimitive or MemRegion).
 // 
 // The simplest encoding of a state field is a pointer to that field's first word.
 // Methods like update_ptr_for_field, read_ptr_for_field, etc. generate the 
 // appropriate pointer given a module and a field name.
 //
-// Generic pointers can be used directly to read single-word values (e.g. Integers).
+// Generic pointers can be used directly to read single-word values (e.g. SingleWordPrimitives).
 // They can also be used to construct more complex pointers (e.g. MemRegionPointer)
 // for fine-grained access to multi-word values.
 //
@@ -26,6 +26,7 @@ use std::convert::TryInto;
 
 pub struct MemRegionPointer<'ctx> {
   ptr: PointerValue<'ctx>,
+  is_string: bool,
 }
 
 impl <'ctx> MemRegionPointer<'ctx> {
@@ -37,7 +38,11 @@ impl <'ctx> MemRegionPointer<'ctx> {
   }
   pub fn new(cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>) -> MemRegionPointer<'ctx> {
     let pair_ty = MemRegionPointer::struct_ir_type(cg).ptr_type(AddressSpace::Generic);
-    MemRegionPointer { ptr: cg.builder.build_bitcast(ptr, pair_ty, "cast_pointer").into_pointer_value() }
+    MemRegionPointer { ptr: cg.builder.build_bitcast(ptr, pair_ty, "cast_pointer").into_pointer_value(), is_string: false }
+  }
+  pub fn new_to_string(cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>) -> MemRegionPointer<'ctx> {
+    let pair_ty = MemRegionPointer::struct_ir_type(cg).ptr_type(AddressSpace::Generic);
+    MemRegionPointer { ptr: cg.builder.build_bitcast(ptr, pair_ty, "cast_pointer").into_pointer_value(), is_string: true }
   }
   pub fn data_ptr(&self, cg: &CodegenState<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
     cg.builder.build_struct_gep(self.ptr, 0, "data").or(Err(CodegenError::InvalidStructPointer("MemRegion::data_ptr given bad state pointer".to_string())))
@@ -48,16 +53,17 @@ impl <'ctx> MemRegionPointer<'ctx> {
 }
 
 pub enum StatePointer<'ctx> {
-  Integer(PointerValue<'ctx>),
+  SingleWordPrimitive(PointerValue<'ctx>),
   MemRegion(MemRegionPointer<'ctx>),
 }
 
 impl <'ctx> StatePointer<'ctx> {
   fn new(cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>, h_type: ast::TypePrimitive) -> Self {
     match h_type {
-      ast::TypePrimitive::Int => StatePointer::Integer(ptr),
+      ast::TypePrimitive::Int => StatePointer::SingleWordPrimitive(ptr),
+      ast::TypePrimitive::Char => StatePointer::SingleWordPrimitive(ptr),
       ast::TypePrimitive::MemRegion => StatePointer::MemRegion(MemRegionPointer::new(cg, ptr)),
-      ast::TypePrimitive::String => panic!("Strings not yet implemented")
+      ast::TypePrimitive::String => StatePointer::MemRegion(MemRegionPointer::new_to_string(cg, ptr))
     }
   }
 }
@@ -70,7 +76,7 @@ pub trait Loadable<'ctx> {
 impl <'ctx> Loadable<'ctx> for PointerValue<'ctx> {
   fn load(&self, cg: &CodegenState<'ctx>, name: &str) -> CodegenResult<StateValue<'ctx>> {
     let value = cg.builder.build_load(*self, name);
-    Ok(StateValue::Integer(value))
+    Ok(StateValue::SingleWordPrimitive(value))
   }
   fn clear(&self, cg: &CodegenState<'ctx>) -> CodegenStatus {
     cg.builder.build_store(*self, cg.uint_const(0));
@@ -82,7 +88,7 @@ impl <'ctx> Loadable<'ctx> for MemRegionPointer<'ctx> {
   fn load(&self, cg: &CodegenState<'ctx>, name: &str) -> CodegenResult<StateValue<'ctx>> {
     let data = cg.builder.build_load(self.data_ptr(cg)?, &(name.to_string() + "_data"));
     let size = cg.builder.build_load(self.size_ptr(cg)?, &(name.to_string() + "_size"));
-    Ok(StateValue::MemRegion(data, size))
+    Ok(StateValue::MemRegion(data, size, self.is_string))
   }
   fn clear(&self, cg: &CodegenState<'ctx>) -> CodegenStatus {
     cg.builder.build_store(self.data_ptr(cg)?, cg.uint_const(0));
@@ -94,13 +100,13 @@ impl <'ctx> Loadable<'ctx> for MemRegionPointer<'ctx> {
 impl <'ctx> Loadable<'ctx> for StatePointer<'ctx> {
   fn load(&self, cg: &CodegenState<'ctx>, name: &str) -> CodegenResult<StateValue<'ctx>> {
     match self {
-      StatePointer::Integer(ptr) => ptr.load(cg, name),
+      StatePointer::SingleWordPrimitive(ptr) => ptr.load(cg, name),
       StatePointer::MemRegion(ptr) => ptr.load(cg, name)
     }
   }
   fn clear(&self, cg: &CodegenState<'ctx>) -> CodegenStatus {
     match self {
-      StatePointer::Integer(ptr) => ptr.clear(cg),
+      StatePointer::SingleWordPrimitive(ptr) => ptr.clear(cg),
       StatePointer::MemRegion(ptr) => ptr.clear(cg)
     }
   }
@@ -109,22 +115,29 @@ impl <'ctx> Loadable<'ctx> for StatePointer<'ctx> {
 #[derive(Debug)]
 pub enum StateValue<'ctx> {
   None,
-  Integer(BasicValueEnum<'ctx>),
-  MemRegion(BasicValueEnum<'ctx>, BasicValueEnum<'ctx>),
+  SingleWordPrimitive(BasicValueEnum<'ctx>),
+  MemRegion(BasicValueEnum<'ctx>, BasicValueEnum<'ctx>, bool),
 }
 
 impl <'ctx> StateValue<'ctx> {
-  pub fn into_int_value(&self) -> IntValue {
-    if let StateValue::Integer(v) = self {
-      v.into_int_value()
+  pub fn into_int_value(&self) -> CodegenResult<IntValue<'ctx>> {
+    if let StateValue::SingleWordPrimitive(v) = self {
+      Ok(v.into_int_value())
     } else {
-      panic!("can't to_int_value() on ${:?}", self)
+      Err(CodegenError::TypeMismatch(std::format!("can't into_int_value() on ${:?}", self)))
+    }
+  }
+  pub fn into_pointer_value(&self) -> CodegenResult<PointerValue<'ctx>> {
+    if let StateValue::MemRegion(ptr, size, _is_string) = self {
+      Ok(ptr.into_pointer_value())
+    } else {
+      Err(CodegenError::TypeMismatch(std::format!("Can't into_pointer_value on ${:?}", self)))
     }
   }
   pub fn store_unsafe(&self, cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>) -> CodegenStatus {
     match self {
-      StateValue::Integer(v) => { cg.builder.build_store(ptr, *v); },
-      StateValue::MemRegion(data, size) => {
+      StateValue::SingleWordPrimitive(v) => { cg.builder.build_store(ptr, *v); },
+      StateValue::MemRegion(data, size, is_string) => {
         let struct_ptr = MemRegionPointer::new(cg, ptr);
         cg.builder.build_store(struct_ptr.data_ptr(cg)?, *data);
         cg.builder.build_store(struct_ptr.size_ptr(cg)?, *size);
@@ -135,19 +148,23 @@ impl <'ctx> StateValue<'ctx> {
   }
   pub fn store(&self, cg: &CodegenState<'ctx>, ptr: StatePointer<'ctx>) -> CodegenStatus {
     match self {
-      StateValue::Integer(v) => { 
-        if let StatePointer::Integer(ptr) = ptr {
+      StateValue::SingleWordPrimitive(v) => { 
+        if let StatePointer::SingleWordPrimitive(ptr) = ptr {
           cg.builder.build_store(ptr, *v);
           Ok(())
         } else {
           Err(CodegenError::TypeMismatch("Attempt to store integer into non-integer pointer".to_string()))
         }
       }
-      StateValue::MemRegion(data, size) => {
+      StateValue::MemRegion(data, size, is_string) => {
         if let StatePointer::MemRegion(ptr) = ptr {
-          cg.builder.build_store(ptr.data_ptr(cg)?, *data);
-          cg.builder.build_store(ptr.size_ptr(cg)?, *size);
-          Ok(())
+          if ptr.is_string != *is_string {
+            Err(CodegenError::TypeMismatch("Attempt to store string into non-string pointer".to_string()))
+          } else {
+            cg.builder.build_store(ptr.data_ptr(cg)?, *data);
+            cg.builder.build_store(ptr.size_ptr(cg)?, *size);
+            Ok(())
+          }
         } else {
           Err(CodegenError::TypeMismatch("Attempt to store memrange into non-memrange pointer".to_string()))
         }
@@ -213,7 +230,7 @@ impl <'ctx> CodegenState<'ctx> {
 
 impl <'ctx> From<StateValue<'ctx>> for BasicValueEnum<'ctx> {
   fn from(item: StateValue<'ctx>) -> Self {    
-    if let StateValue::Integer(v) = item {
+    if let StateValue::SingleWordPrimitive(v) = item {
       v
     } else {
       panic!("can't convert ${:?} into BasicValueEnum")

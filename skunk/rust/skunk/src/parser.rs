@@ -5,8 +5,8 @@ use super::ast;
 use nom::{
   IResult,
   branch::alt,
-  bytes::complete::{tag, is_a},
-  character::complete::{alpha1, char, multispace0, multispace1}, 
+  bytes::complete::{tag, is_a, take_until},
+  character::complete::{alpha1, char, multispace0, multispace1, digit1}, 
   combinator::{verify, eof, cut},
   error::{Error, ErrorKind, VerboseError, VerboseErrorKind},
   multi::{separated_list0, separated_list1},
@@ -55,10 +55,12 @@ fn usages(i: &str) -> ParseResult<Vec<ast::Usage>> {
 }
 
 fn type_primitive_token(i: &str) -> ParseResult<ast::TypePrimitive> {
-  let int = token("Int", ast::TypePrimitive::Int);
-  let string = token("String", ast::TypePrimitive::String);
-  let mem_region = token("MemRegion", ast::TypePrimitive::MemRegion);
-  cut(alt((int, string, mem_region)))(i)
+  cut(alt((
+    token("Int", ast::TypePrimitive::Int),
+    token("String", ast::TypePrimitive::String),
+    token("MemRegion", ast::TypePrimitive::MemRegion),
+    token("Char", ast::TypePrimitive::Char),
+  )))(i)
 }
 
 fn handle(i: &str) -> ParseResult<ast::Handle> {
@@ -89,6 +91,16 @@ fn state_reference(i: &str) -> ParseResult<ast::Expression> {
   name(i).map(|(rest, state_elt)| (rest, ast::Expression::ReferenceToState(state_elt.to_string())))
 }
 
+fn int_literal(i: &str) -> ParseResult<ast::Expression> {
+  let (input, const_int) = digit1(i)?;
+  Ok((input, ast::Expression::IntLiteral(const_int.parse::<i64>().unwrap())))
+}
+
+fn string_literal(i: &str) -> ParseResult<ast::Expression> {
+  let (input, (_, literal, _)) = tuple((char('"'), take_until("\""), char('"')))(i)?;
+  Ok((input, ast::Expression::StringLiteral(literal.to_string())))
+}
+
 fn function(i: &str) -> ParseResult<ast::Expression> {
   // TODO: multiple arguments
   let (input, (f_name, _, _, _, f_arg, _, _)) = tuple((name, multispace0, char('('), multispace0, expression, multispace0, char(')')))(i)?;
@@ -99,7 +111,24 @@ fn function(i: &str) -> ParseResult<ast::Expression> {
 }
 
 fn expression(i: &str) -> ParseResult<ast::Expression> {
-  alt((function, state_reference))(i)
+  let (input, expr) = alt((
+    int_literal,
+    string_literal, 
+    function, 
+    state_reference
+  ))(i)?;
+  let mut result = expr;
+  let mut remainder = input;
+  while true {
+    let test = delimited(char('['), expression, char(']'))(remainder);
+    if let Ok((input, expr)) = test {
+      result = ast::Expression::ArrayLookup(Box::new(result), Box::new(expr));
+      remainder = input;
+    } else {
+      break;
+    }
+  }
+  return Ok((remainder, result));
 }
 
 fn statement(i: &str) -> ParseResult<ast::Statement> {

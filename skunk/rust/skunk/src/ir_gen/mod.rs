@@ -3,9 +3,11 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{BasicTypeEnum, AnyTypeEnum, StructType};
-use inkwell::values::{FunctionValue, PointerValue, BasicValueEnum, IntValue};
+use inkwell::values::{FunctionValue, PointerValue, BasicValueEnum, IntValue, ArrayValue};
 
 use super::ast;
+
+use std::convert::TryInto;
 
 pub mod codegen_state;
 mod state_values;
@@ -28,8 +30,8 @@ trait Nameable {
 fn handle_type<'ctx>(cg: &CodegenState<'ctx>, handle: &ast::Handle) -> BasicTypeEnum<'ctx> {
   match handle.h_type {
     ast::TypePrimitive::Int => cg.context.i64_type().into(),
-    ast::TypePrimitive::MemRegion => MemRegionPointer::struct_ir_type(cg).into(),
-    ast::TypePrimitive::String => panic!("we don't yet handle strings",)
+    ast::TypePrimitive::Char => cg.context.i64_type().into(),
+    ast::TypePrimitive::MemRegion | ast::TypePrimitive::String => MemRegionPointer::struct_ir_type(cg).into(),
   }
 }
 
@@ -233,7 +235,7 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
         "new" => {
           let size = value.into();
           let raw_location = malloc(cg, size, "mem_region_location");
-          Ok(StateValue::MemRegion(raw_location, size))
+          Ok(StateValue::MemRegion(raw_location, size, false))
         }
         "size" => {
           let value = expression_codegen(cg, module, expression, state_alloca)?;
@@ -241,9 +243,9 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
           // directly computed memrange values. Probably requires being able to represent pointers
           // as values, and may not be useful.
           match value {
-            StateValue::Integer(v) => Err(CodegenError::InvalidFunctionArgument("Can't call size() on Integer result".to_string())),
-            StateValue::MemRegion(_data, size) => {
-              Ok(StateValue::Integer(size))
+            StateValue::SingleWordPrimitive(_v) => Err(CodegenError::InvalidFunctionArgument("Can't call size() on SingleWordPrimitive result".to_string())),
+            StateValue::MemRegion(_data, size, _is_string) => {
+              Ok(StateValue::SingleWordPrimitive(size))
             }
             StateValue::None => Err(CodegenError::InvalidFunctionArgument("Can't call size() on None result".to_string()))
           }
@@ -252,6 +254,29 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
           panic!("Don't know function {}", name);
         }
       }
+    }
+    ast::Expression::StringLiteral(literal) => {
+      let size = cg.context.i64_type().const_int(literal.len().try_into().unwrap(), false);
+      // let int_values: Vec<IntValue> = literal.as_bytes().iter().map(|b| cg.context.i8_type().const_int((*b).into(), false)).collect();
+      // let string = cg.context.i8_type().const_array(&int_values);
+      // let string = cg.module.add_global(cg.context.i8_type().(AddressSpace::Const), Some(AddressSpace::Const), "literal");
+      // let string: ArrayValue = cg.context.const_string(literal.as_bytes(), false).into_array_value();
+      let string = cg.builder.build_global_string_ptr(literal, "literal");
+      Ok(StateValue::MemRegion(string.as_pointer_value().into(), size.into(), true))
+    }
+    ast::Expression::IntLiteral(literal) => {
+      Ok(StateValue::SingleWordPrimitive(cg.context.i64_type().const_int(*literal as u64, true).into()))
+    }
+    ast::Expression::ArrayLookup(value, index) => {
+      let arr_ptr = expression_codegen(cg, module, value, state_alloca)?;
+      let idx = expression_codegen(cg, module, index, state_alloca)?;
+      // TODO: bounds checking when necessary
+      let value_ptr;
+      unsafe {
+        value_ptr = cg.builder.build_gep(arr_ptr.into_pointer_value()?, &[idx.into_int_value()?], "lookup");
+      }
+      let value = cg.builder.build_load(value_ptr, "value");
+      Ok(StateValue::SingleWordPrimitive(value))
     }
   }
 }
@@ -403,7 +428,6 @@ mod tests {
     
     let (_, ast) = parser::parse(module).unwrap();
     if ast::modules(&ast).len() == 1 && ast::graphs(&ast).len() == 0 {
-      println!("here {:?}", &ast::modules(&ast));
       codegen(&context, &mut jit_info, &ast::modules(&ast)[0])?;
     } else {
       let mut graph = graph_builder::make_graph(ast::graphs(&ast));
@@ -606,5 +630,43 @@ Writer -> Reader;
     })
   }
 
+  static STRING_TEST_STRING: &str = "
+module CreateString {
+  inp: reads Int;
+  out: writes String;
 
+  inp.onChange: out <- \"static string\";
+}
+
+module CharFromString {
+  inp: reads String;
+  out: writes Char;
+  
+  inp.onChange: out <- inp[5];
+}
+
+CreateString -> CharFromString;
+  ";
+
+  state_struct!(CreateString, inp: u64, out: MemRegion);
+  state_struct!(CharFromString, inp: MemRegion, out: u64);
+  state_struct!(StringTestMain, inp: u64, out: u64, h0: MemRegion | writer: CreateStringState, reader: CharFromStringState);
+
+  #[test]
+  fn jit_create_string_codegen_runs() -> CodegenStatus {
+    ee_for_string(STRING_TEST_STRING, |ee: ExecutionEngine| {
+      unsafe {
+        let function: JitFunction<StringTestMainFunc> = ee.get_function("Main_update").unwrap();
+        let mut state = StringTestMainState {
+          inp: 0, inp_upd: 10, h0: MemRegion::empty(), h0_upd: MemRegion::empty(), out: 0, out_upd: 0, bitfield: 0x1,
+          writer: CreateStringState { inp: 0, inp_upd: 0, out: MemRegion::empty(), out_upd: MemRegion::empty(), bitfield: 0x0},
+          reader: CharFromStringState { inp: MemRegion::empty(), inp_upd: MemRegion::empty(), out: 0, out_upd: 0, bitfield: 0x0}
+        };
+
+        function.call(&mut state);
+        function.call(&mut state);
+        assert_eq!(state.out_upd, 'c' as u64);
+      }
+    })
+  }
 }

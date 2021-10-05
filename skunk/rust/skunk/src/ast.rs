@@ -10,6 +10,7 @@ pub enum Usage {
 pub enum TypePrimitive {
   Int,
   String,
+  Char,
   MemRegion
 }
 
@@ -54,9 +55,12 @@ pub struct CopyTo {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Expression {
+  ArrayLookup(Box<Expression>, Box<Expression>),
   ReferenceToState(String),
   CopyToSubModule(CopyTo),
-  Function(String, Box<Expression>)
+  Function(String, Box<Expression>),
+  StringLiteral(String),
+  IntLiteral(i64),
 }
 
 #[derive(Debug, PartialEq, Clone)]
