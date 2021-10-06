@@ -239,16 +239,7 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
         }
         "size" => {
           let value = expression_codegen(cg, module, expression, state_alloca)?;
-          // TODO: size should (maybe?) work on both state pointers to allocated memranges, and
-          // directly computed memrange values. Probably requires being able to represent pointers
-          // as values, and may not be useful.
-          match value {
-            StateValue::SingleWordPrimitive(_v) => Err(CodegenError::InvalidFunctionArgument("Can't call size() on SingleWordPrimitive result".to_string())),
-            StateValue::MemRegion(_data, size, _is_string) => {
-              Ok(StateValue::SingleWordPrimitive(size))
-            }
-            StateValue::None => Err(CodegenError::InvalidFunctionArgument("Can't call size() on None result".to_string()))
-          }
+          value.size()
         }
         _name => {
           panic!("Don't know function {}", name);
@@ -257,10 +248,6 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
     }
     ast::Expression::StringLiteral(literal) => {
       let size = cg.context.i64_type().const_int(literal.len().try_into().unwrap(), false);
-      // let int_values: Vec<IntValue> = literal.as_bytes().iter().map(|b| cg.context.i8_type().const_int((*b).into(), false)).collect();
-      // let string = cg.context.i8_type().const_array(&int_values);
-      // let string = cg.module.add_global(cg.context.i8_type().(AddressSpace::Const), Some(AddressSpace::Const), "literal");
-      // let string: ArrayValue = cg.context.const_string(literal.as_bytes(), false).into_array_value();
       let string = cg.builder.build_global_string_ptr(literal, "literal");
       Ok(StateValue::MemRegion(string.as_pointer_value().into(), size.into(), true))
     }
@@ -270,13 +257,7 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
     ast::Expression::ArrayLookup(value, index) => {
       let arr_ptr = expression_codegen(cg, module, value, state_alloca)?;
       let idx = expression_codegen(cg, module, index, state_alloca)?;
-      // TODO: bounds checking when necessary
-      let value_ptr;
-      unsafe {
-        value_ptr = cg.builder.build_gep(arr_ptr.into_pointer_value()?, &[idx.into_int_value()?], "lookup");
-      }
-      let value = cg.builder.build_load(value_ptr, "value");
-      Ok(StateValue::SingleWordPrimitive(value))
+      arr_ptr.array_lookup(cg, idx)
     }
   }
 }

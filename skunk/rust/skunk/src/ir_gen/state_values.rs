@@ -134,18 +134,6 @@ impl <'ctx> StateValue<'ctx> {
       Err(CodegenError::TypeMismatch(std::format!("Can't into_pointer_value on ${:?}", self)))
     }
   }
-  pub fn store_unsafe(&self, cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>) -> CodegenStatus {
-    match self {
-      StateValue::SingleWordPrimitive(v) => { cg.builder.build_store(ptr, *v); },
-      StateValue::MemRegion(data, size, is_string) => {
-        let struct_ptr = MemRegionPointer::new(cg, ptr);
-        cg.builder.build_store(struct_ptr.data_ptr(cg)?, *data);
-        cg.builder.build_store(struct_ptr.size_ptr(cg)?, *size);
-      },
-      StateValue::None => {}
-    }
-    Ok(())
-  }
   pub fn store(&self, cg: &CodegenState<'ctx>, ptr: StatePointer<'ctx>) -> CodegenStatus {
     match self {
       StateValue::SingleWordPrimitive(v) => { 
@@ -172,6 +160,27 @@ impl <'ctx> StateValue<'ctx> {
       StateValue::None => Ok(())
     }
   }
+  pub fn size(&self) -> CodegenResult<Self> {
+    // TODO: size should (maybe?) work on both state pointers to allocated memranges, and
+    // directly computed memrange values. Probably requires being able to represent pointers
+    // as values, and may not be useful.
+    match self {
+      StateValue::SingleWordPrimitive(_v) => Err(CodegenError::InvalidFunctionArgument("Can't call size() on SingleWordPrimitive result".to_string())),
+      StateValue::MemRegion(_data, size, _is_string) => {
+        Ok(StateValue::SingleWordPrimitive(*size))
+      }
+      StateValue::None => Err(CodegenError::InvalidFunctionArgument("Can't call size() on None result".to_string()))
+    }
+  }
+  pub fn array_lookup(&self, cg: &CodegenState<'ctx>, index: StateValue<'ctx>) -> CodegenResult<Self> {
+    // TODO: bounds checking when necessary
+    let value_ptr;
+    unsafe {
+      value_ptr = cg.builder.build_gep(self.into_pointer_value()?, &[index.into_int_value()?], "lookup");
+    }
+    let value = cg.builder.build_load(value_ptr, "value");
+    Ok(StateValue::SingleWordPrimitive(value))
+  } 
 }
 
 pub enum UpdatePtrPurpose {
