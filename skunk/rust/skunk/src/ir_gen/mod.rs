@@ -30,8 +30,8 @@ trait Nameable {
 fn handle_type<'ctx>(cg: &CodegenState<'ctx>, handle: &ast::Handle) -> BasicTypeEnum<'ctx> {
   match handle.h_type {
     ast::TypePrimitive::Int => cg.context.i64_type().into(),
-    ast::TypePrimitive::Char => cg.context.i64_type().into(),
-    ast::TypePrimitive::MemRegion | ast::TypePrimitive::String => MemRegionPointer::struct_ir_type(cg).into(),
+    ast::TypePrimitive::Char => cg.context.i8_type().into(),
+    ast::TypePrimitive::MemRegion | ast::TypePrimitive::String => memregion_ir_type(cg).into(),
   }
 }
 
@@ -227,19 +227,19 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
       cg.builder.build_conditional_branch(has_update, copy_back, updates_complete);
       cg.builder.position_at_end(updates_complete);      
 
-      Ok(StateValue::None)
+      Ok(StateValue::new_none())
     }
     ast::Expression::Function(name, expression) => {
       let value = expression_codegen(cg, module, expression, state_alloca)?;
       match name.as_str() {
         "new" => {
-          let size = value.into();
-          let raw_location = malloc(cg, size, "mem_region_location");
-          Ok(StateValue::MemRegion(raw_location, size, false))
+          let size = value.into_int_value()?;
+          let raw_location = malloc(cg, size.into(), "mem_region_location").into_pointer_value();
+          Ok(StateValue::new_dynamic_mem_region_of_type(raw_location, size, vec!(TypePrimitive::MemRegion)))
         }
         "size" => {
           let value = expression_codegen(cg, module, expression, state_alloca)?;
-          value.size()
+          value.size(cg)
         }
         _name => {
           panic!("Don't know function {}", name);
@@ -249,10 +249,10 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
     ast::Expression::StringLiteral(literal) => {
       let size = cg.context.i64_type().const_int(literal.len().try_into().unwrap(), false);
       let string = cg.builder.build_global_string_ptr(literal, "literal");
-      Ok(StateValue::MemRegion(string.as_pointer_value().into(), size.into(), true))
+      Ok(StateValue::new_dynamic_mem_region_of_type(string.as_pointer_value(), size, vec!(TypePrimitive::DynamicArrayOf(Box::new(vec!(TypePrimitive::Char))))))
     }
     ast::Expression::IntLiteral(literal) => {
-      Ok(StateValue::SingleWordPrimitive(cg.context.i64_type().const_int(*literal as u64, true).into()))
+      Ok(StateValue::new_int(cg.uint_const(*literal as u64)))
     }
     ast::Expression::ArrayLookup(value, index) => {
       let arr_ptr = expression_codegen(cg, module, value, state_alloca)?;
@@ -630,8 +630,8 @@ CreateString -> CharFromString;
   ";
 
   state_struct!(CreateString, inp: u64, out: MemRegion);
-  state_struct!(CharFromString, inp: MemRegion, out: u64);
-  state_struct!(StringTestMain, inp: u64, out: u64, h0: MemRegion | writer: CreateStringState, reader: CharFromStringState);
+  state_struct!(CharFromString, inp: MemRegion, out: u8);
+  state_struct!(StringTestMain, inp: u64, out: u8, h0: MemRegion | writer: CreateStringState, reader: CharFromStringState);
 
   #[test]
   fn jit_create_string_codegen_runs() -> CodegenStatus {
@@ -646,7 +646,7 @@ CreateString -> CharFromString;
 
         function.call(&mut state);
         function.call(&mut state);
-        assert_eq!(state.out_upd, 'c' as u64);
+        assert_eq!(state.out_upd, 'c' as u8);
       }
     })
   }

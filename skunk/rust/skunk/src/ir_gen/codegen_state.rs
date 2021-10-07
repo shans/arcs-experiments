@@ -43,7 +43,7 @@ impl <'ctx> CodegenState<'ctx> {
   }
 
   
-  pub fn uint_const(&self, value: u64) -> IntValue {
+  pub fn uint_const(&self, value: u64) -> IntValue<'ctx> {
     self.context.i64_type().const_int(value, false)
   }
 }
