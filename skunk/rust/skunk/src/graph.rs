@@ -1,10 +1,10 @@
 
-use super::ast::TypePrimitive;
+use super::ast::Type;
 
 #[derive(Debug)]
 pub struct Handle {
   pub name: String,
-  pub h_type: TypePrimitive
+  pub h_type: Type
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -74,7 +74,7 @@ impl Graph {
     Endpoint::Connection(self.connections.len() - 1)
   }
 
-  pub fn add_handle(&mut self, handle_name: &str, handle_type: TypePrimitive) -> Endpoint {
+  pub fn add_handle(&mut self, handle_name: &str, handle_type: Type) -> Endpoint {
     self.handles.push(Handle { name: handle_name.to_string(), h_type: handle_type });
     Endpoint::Handle(self.handles.len() - 1)
   }

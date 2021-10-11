@@ -37,10 +37,10 @@ fn name(i: &str) -> ParseResult<&str> {
   verify(is_a(ALLOWED_CHARS), |s: &str| s.len() > 0 && is_lower_alphabetic(s.chars().nth(0).unwrap()))(i)
 }
 
-fn token<T : Copy>(text: &'static str, result: T) -> impl Fn(&str) -> ParseResult<T> {
+fn token<T: Clone>(text: &'static str, result: T) -> impl Fn(&str) -> ParseResult<T> {
   move |i: &str| {
     let (input, _) = tag(text)(i)?;
-    Ok((input, result))
+    Ok((input, result.clone()))
   }
 }
 
@@ -54,18 +54,27 @@ fn usages(i: &str) -> ParseResult<Vec<ast::Usage>> {
   cut(separated_list1(multispace1, usage_token))(i)
 }
 
-fn type_primitive_token(i: &str) -> ParseResult<ast::TypePrimitive> {
-  cut(alt((
-    token("Int", ast::TypePrimitive::Int),
-    token("String", ast::TypePrimitive::String),
-    token("MemRegion", ast::TypePrimitive::MemRegion),
-    token("Char", ast::TypePrimitive::Char),
-  )))(i)
+fn type_primitive_token(i: &str) -> ParseResult<ast::Type> {
+  alt((
+    token("Int", ast::Type::Int),
+    token("String", ast::Type::String),
+    token("MemRegion", ast::Type::MemRegion),
+    token("Char", ast::Type::Char),
+  ))(i)
+}
+
+fn tuple_type(i: &str) -> ParseResult<ast::Type> {
+  let (input, members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), handle_type), char(')'))(i)?;
+  Ok((input, ast::Type::Tuple(members)))
+}
+
+fn handle_type(i: &str) -> ParseResult<ast::Type> {
+  cut(alt((type_primitive_token, tuple_type)))(i)
 }
 
 fn handle(i: &str) -> ParseResult<ast::Handle> {
   let (input, (h_name, _, _, _, h_usages, _, h_type, _, _))
-    = tuple((name, multispace0, char(':'), multispace0, usages, multispace1, type_primitive_token, multispace0, char(';')))(i)?;
+    = tuple((name, multispace0, char(':'), multispace0, usages, multispace1, handle_type, multispace0, char(';')))(i)?;
   Ok((
     input, 
     ast::Handle {
@@ -101,6 +110,11 @@ fn string_literal(i: &str) -> ParseResult<ast::Expression> {
   Ok((input, ast::Expression::StringLiteral(literal.to_string())))
 }
 
+fn tuple_expression(i: &str) -> ParseResult<ast::Expression> {
+  let (input, members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression), char(')'))(i)?;
+  Ok((input, ast::Expression::Tuple(members)))
+}
+
 fn function(i: &str) -> ParseResult<ast::Expression> {
   // TODO: multiple arguments
   let (input, (f_name, _, _, _, f_arg, _, _)) = tuple((name, multispace0, char('('), multispace0, expression, multispace0, char(')')))(i)?;
@@ -114,6 +128,7 @@ fn expression(i: &str) -> ParseResult<ast::Expression> {
   let (input, expr) = alt((
     int_literal,
     string_literal, 
+    tuple_expression,
     function, 
     state_reference
   ))(i)?;
@@ -135,7 +150,7 @@ fn statement(i: &str) -> ParseResult<ast::Statement> {
   let (input, (output_name, _, _, _, expr)) = cut(tuple((name, multispace0, tag("<-"), multispace0, expression)))(i)?;
   Ok((
     input,
-    ast::Statement { output: output_name.to_string(), expression: expr }
+    ast::Statement::Output(ast::OutputStatement { output: output_name.to_string(), expression: expr })
   ))
 }
 
@@ -238,7 +253,7 @@ mod tests {
 
   #[test]
   fn parse_type_primitive() {
-    assert_eq!(type_primitive_token("Int"), Ok(("", ast::TypePrimitive::Int)));
+    assert_eq!(type_primitive_token("Int"), Ok(("", ast::Type::Int)));
   }
 
   #[test]
@@ -255,21 +270,21 @@ mod tests {
       handle("foo: reads writes Int;"),
       Ok((
         "",
-        ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int }
+        ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
       ))
     );
     assert_eq!(
       handle("bar: writes String;"),
       Ok((
         "",
-        ast::Handle { name: String::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::TypePrimitive::String }
+        ast::Handle { name: String::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::String }
       ))
     );
     assert_eq!(
       handle("foo: reads writes Int; bar: writes String;"),
       Ok((
         " bar: writes String;",
-        ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int }
+        ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
       ))
     )
   }
@@ -282,8 +297,8 @@ mod tests {
       Ok((
         "",
         vec!(
-          ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int },
-          ast::Handle { name: String::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::TypePrimitive::String },
+          ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
+          ast::Handle { name: String::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::String },
         )
       ))
     )
@@ -301,9 +316,11 @@ mod tests {
       listener("foo.onChange: bar <- far;"),
       Ok((
         "",
-        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
-          output: String::from("bar"), expression: ast::Expression::ReferenceToState(String:: from("far"))
-        }}
+        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
+          ast::OutputStatement {
+            output: String::from("bar"), expression: ast::Expression::ReferenceToState(String:: from("far"))
+          }
+        )}
       ))
     )
   }
@@ -316,12 +333,16 @@ mod tests {
       Ok((
         "",
         vec!(
-          ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
-            output: String::from("bar"), expression: ast::Expression::ReferenceToState(String:: from("far"))
-          }},
-          ast::Listener { trigger: String::from("far"), kind: ast::ListenerKind::OnWrite, statement: ast::Statement {
-            output: String::from("bax"), expression: ast::Expression::ReferenceToState(String:: from("fax"))
-          }}
+          ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
+            ast::OutputStatement {
+              output: String::from("bar"), expression: ast::Expression::ReferenceToState(String:: from("far"))
+            }
+          )},
+          ast::Listener { trigger: String::from("far"), kind: ast::ListenerKind::OnWrite, statement: ast::Statement::Output (
+            ast::OutputStatement {
+              output: String::from("bax"), expression: ast::Expression::ReferenceToState(String:: from("fax"))
+            }
+          )}
         )
 
       ))
@@ -338,11 +359,13 @@ mod tests {
   fn test_module_result() -> ast::Module {
     ast::Module {
       name: String::from("TestModule"),
-      handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int }),
-      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
-        output: String::from("bar"),
-        expression: ast::Expression::Function("far".to_string(), Box::new(ast::Expression::ReferenceToState(String::from("la"))))
-      }}),
+      handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
+      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
+        ast::OutputStatement {
+          output: String::from("bar"),
+          expression: ast::Expression::Function("far".to_string(), Box::new(ast::Expression::ReferenceToState(String::from("la"))))
+        }
+      )}),
       submodules: Vec::new(),
     }
   }

@@ -6,12 +6,14 @@ pub enum Usage {
   Write,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum TypePrimitive {
+// TODO: consider making references Rc<Vec<Type>> so this is copiable.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Type {
   Int,
   String,
   Char,
-  MemRegion
+  MemRegion,
+  Tuple(Vec<Type>)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -33,7 +35,7 @@ impl ListenerKind {
 pub struct Handle {
   pub name: String,
   pub usages: Vec<Usage>,
-  pub h_type: TypePrimitive,
+  pub h_type: Type,
 }
 
 impl Handle {
@@ -61,12 +63,19 @@ pub enum Expression {
   Function(String, Box<Expression>),
   StringLiteral(String),
   IntLiteral(i64),
+  Tuple(Vec<Expression>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Statement {
+pub struct OutputStatement {
   pub output: String,
   pub expression: Expression,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Statement {
+  Output(OutputStatement),
+  Block(Vec<Statement>)
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -111,8 +120,8 @@ impl Module {
     self.handles.iter().find(|handle| handle.name == field)
   }
 
-  pub fn type_for_field(&self, field: &str) -> Option<TypePrimitive> {
-    Some(self.handle_for_field(field)?.h_type)
+  pub fn type_for_field(&self, field: &str) -> Option<Type> {
+    Some(self.handle_for_field(field)?.h_type.clone())
   }
 }
 

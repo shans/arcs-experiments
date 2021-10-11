@@ -2,7 +2,7 @@ use inkwell::{AddressSpace, IntPredicate, };
 use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
 use inkwell::module::Module;
-use inkwell::types::{BasicTypeEnum, AnyTypeEnum, StructType};
+use inkwell::types::{BasicTypeEnum, AnyTypeEnum, StructType, BasicType};
 use inkwell::values::{FunctionValue, PointerValue, BasicValueEnum, IntValue, ArrayValue};
 
 use super::ast;
@@ -27,11 +27,25 @@ trait Nameable {
   fn fn_name(&self) -> String;
 }
 
+// TODO: probably this is better done via the TypePrimitive derived from the type?
 fn handle_type<'ctx>(cg: &CodegenState<'ctx>, handle: &ast::Handle) -> BasicTypeEnum<'ctx> {
-  match handle.h_type {
-    ast::TypePrimitive::Int => cg.context.i64_type().into(),
-    ast::TypePrimitive::Char => cg.context.i8_type().into(),
-    ast::TypePrimitive::MemRegion | ast::TypePrimitive::String => memregion_ir_type(cg).into(),
+  let primitive_type = type_primitive_for_type(&handle.h_type);
+  llvm_type_for_primitive(cg, &primitive_type)
+}
+
+fn llvm_type_for_primitive<'ctx>(cg: &CodegenState<'ctx>, primitive_type: &Vec<TypePrimitive>) -> BasicTypeEnum<'ctx> {
+  if primitive_type.len() != 1 {
+    let element_types: Vec<BasicTypeEnum<'ctx>> = primitive_type.iter().map(|t| llvm_type_for_primitive(cg, &vec!(t.clone()))).collect(); 
+    cg.context.struct_type(&element_types, false).into()
+  } else {
+    match &primitive_type[0] {
+      TypePrimitive::Int => cg.context.i64_type().into(),
+      TypePrimitive::Char => cg.context.i8_type().into(),
+      TypePrimitive::MemRegion => dptr_ir_type(cg, cg.context.i8_type().into()).into(),
+      TypePrimitive::DynamicArrayOf(x) => dptr_ir_type(cg, llvm_type_for_primitive(cg, &x).into()).into(),
+      TypePrimitive::PointerTo(x) => llvm_type_for_primitive(cg, x).ptr_type(AddressSpace::Generic).into(),
+      TypePrimitive::FixedArrayOf(x, _s) => llvm_type_for_primitive(cg, x).ptr_type(AddressSpace::Generic).into(),
+    }
   }
 }
 
@@ -116,7 +130,7 @@ fn module_update_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module) -
     let update_ptr = cg.update_ptr_for_field(module, state_ptr, &handle.name, UpdatePtrPurpose::ReadAndClear)?;
     let value = update_ptr.load(cg, "value")?;
     value.store(cg, write_ptr)?;
-    update_ptr.clear(cg)?;
+    update_ptr.clear_update_pointer(cg)?;
 
     for listener in module.listeners.iter() {
       if listener.trigger == handle.name {
@@ -172,16 +186,57 @@ fn statement_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, statem
   cg.builder.position_at_end(entry_block);
   let state_alloca = state_alloca_for_module_function(cg, module, function);
 
-  let return_value = expression_codegen(cg, module, &statement.expression, state_alloca)?;
-  // statement.output == "" is a workaround for an effectful expression (e.g. a CopyToSubModule). This is an 'orrible 'ack and should
-  // be reverted once it's possible to track effected fields from CopyToSubModule + return a fieldSet for update.
-  if statement.output.len() > 0 {
-    let state_ptr = cg.builder.build_load(state_alloca, "state_ptr");
-    let update_ptr = cg.update_ptr_for_field(module, state_ptr.into_pointer_value(), &statement.output, UpdatePtrPurpose::WriteAndSet)?;
-    return_value.store(cg, update_ptr)?;
+  match statement {
+    ast::Statement::Output(output_statement) => {
+      let return_value = expression_codegen(cg, module, &output_statement.expression, state_alloca)?;
+      // statement.output == "" is a workaround for an effectful expression (e.g. a CopyToSubModule). This is an 'orrible 'ack and should
+      // be reverted once it's possible to track effected fields from CopyToSubModule + return a fieldSet for update.
+      if output_statement.output.len() > 0 {
+        let state_ptr = cg.builder.build_load(state_alloca, "state_ptr");
+        let update_ptr = cg.update_ptr_for_field(module, state_ptr.into_pointer_value(), &output_statement.output, UpdatePtrPurpose::WriteAndSet)?;
+        return_value.store(cg, update_ptr)?;
+      }
+      cg.builder.build_return(Option::None);
+    }
+    ast::Statement::Block(statements) => {
+      panic!("can't handle blocks yet");
+    }
   }
-  cg.builder.build_return(Option::None);
-  Ok(())
+ Ok(())
+}
+
+// Type inference it aint, but this'll do for now.
+fn expression_type(module: &ast::Module, expression: &ast::Expression) -> CodegenResult<Vec<TypePrimitive>> {
+  match expression {
+    ast::Expression::IntLiteral(_) => Ok(vec!(TypePrimitive::Int)),
+    ast::Expression::StringLiteral(_) => Ok(vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char)))),
+    ast::Expression::ArrayLookup(arr_exp, _) => {
+      let arr_type = expression_type(module, arr_exp)?;
+      if arr_type.len() != 1 {
+        Err(CodegenError::TypeMismatch("array lookup on non-array".to_string()))
+      } else if let TypePrimitive::FixedArrayOf(x, _) | TypePrimitive::DynamicArrayOf(x) = &arr_type[0] {
+        Ok(x.clone())
+      } else {
+        Err(CodegenError::TypeMismatch("array lookup on non-array".to_string()))
+      }
+    }
+    ast::Expression::CopyToSubModule(_) => Ok(Vec::new()),
+    ast::Expression::Function(name, _) => {
+      match name.as_str() {
+        "new" => Ok(vec!(TypePrimitive::MemRegion)),
+        "size" => Ok(vec!(TypePrimitive::Int)),
+        _name => panic!("Don't know function {}", name)
+      }
+    }
+    ast::Expression::ReferenceToState(field) => {
+      let h_type = module.type_for_field(field).ok_or(CodegenError::BadReadFieldName)?;
+      Ok(type_primitive_for_type(&h_type))
+    }
+    ast::Expression::Tuple(exprs) => {
+      let tuple_contents = exprs.iter().map(|expr| expression_type(module, expr)).flatten().flatten().collect();
+      Ok(vec!(TypePrimitive::PointerTo(tuple_contents)))
+    }
+  }
 }
 
 fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expression: &ast::Expression, state_alloca: PointerValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
@@ -249,7 +304,7 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
     ast::Expression::StringLiteral(literal) => {
       let size = cg.context.i64_type().const_int(literal.len().try_into().unwrap(), false);
       let string = cg.builder.build_global_string_ptr(literal, "literal");
-      Ok(StateValue::new_dynamic_mem_region_of_type(string.as_pointer_value(), size, vec!(TypePrimitive::DynamicArrayOf(Box::new(vec!(TypePrimitive::Char))))))
+      Ok(StateValue::new_dynamic_mem_region_of_type(string.as_pointer_value(), size, vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char)))))
     }
     ast::Expression::IntLiteral(literal) => {
       Ok(StateValue::new_int(cg.uint_const(*literal as u64)))
@@ -258,6 +313,28 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
       let arr_ptr = expression_codegen(cg, module, value, state_alloca)?;
       let idx = expression_codegen(cg, module, index, state_alloca)?;
       arr_ptr.array_lookup(cg, idx)
+    }
+    ast::Expression::Tuple(entries) => {
+      // TODO: this won't deal with inlined tuples; will need to create a new StateValue type for those.
+      let tuple_type = expression_type(module, expression)?;
+      if let TypePrimitive::PointerTo(members) = &tuple_type[0] {
+        let tuple_size = type_size(&members);
+        let tuple_ptr = malloc(cg, cg.uint_const(tuple_size).into(), "tuple_memory").into_pointer_value();
+        let tuple_llvm_type = llvm_type_for_primitive(cg, &tuple_type);
+        let typed_tuple_ptr = cg.builder.build_bitcast(tuple_ptr, tuple_llvm_type, "ptr_as_struct_ptr").into_pointer_value();
+        for (idx, entry) in entries.iter().enumerate() {
+          let value = expression_codegen(cg, module, entry, state_alloca)?;
+          let ptr = cg.builder.build_struct_gep(typed_tuple_ptr, idx as u32, "tuple_entry").or(Err(CodegenError::InvalidStructPointer("Bad tuple pointer".to_string())))?;
+          // TODO: This should all be wrapped up in a StateValue for tuples maybe? Or something anyway.
+          let ptr_type = expression_type(module, entry)?;
+          let ptr_kind = pointer_kind_for_type_primitive(&ptr_type);
+          let typed_ptr = StatePointer { pointer_kind: ptr_kind, pointer_type: ptr_type, pointer: ptr };
+          value.store(cg, typed_ptr)?;
+        }
+        Ok(StateValue { value: ValueParts::StaticMemRegion(tuple_ptr), value_type: tuple_type })
+      } else {
+        panic!("Should not be possible");
+      }
     }
   }
 }
@@ -347,16 +424,20 @@ mod tests {
 
   use paste::paste;
 
+  use std::ptr;
+
   fn test_module() -> ast::Module {
     ast::Module {
       name: String::from("TestModule"),
-      handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int },
-                    ast::Handle { name: String::from("far"), usages: vec!(ast::Usage::Read), h_type: ast::TypePrimitive::Int },
-                    ast::Handle { name: String::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::TypePrimitive::Int }
+      handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
+                    ast::Handle { name: String::from("far"), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
+                    ast::Handle { name: String::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
                   ),
-      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
-        output: String::from("bar"), expression: ast::Expression::ReferenceToState(String::from("far"))
-      }}),
+      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
+        ast::OutputStatement {
+          output: String::from("bar"), expression: ast::Expression::ReferenceToState(String::from("far"))
+        }
+      )}),
       submodules: Vec::new(),
     }
   }
@@ -364,10 +445,12 @@ mod tests {
   fn invalid_module() -> ast::Module {
      ast::Module {
       name: String::from("InvalidModule"),
-      handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::TypePrimitive::Int }),
-      listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, statement: ast::Statement {
-        output: String::from("foo"), expression: ast::Expression::ReferenceToState(String::from("foo"))
-      }}),
+      handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
+      listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
+        ast::OutputStatement {
+          output: String::from("foo"), expression: ast::Expression::ReferenceToState(String::from("foo"))
+        })
+      }),
       submodules: Vec::new(),
     }
   }
@@ -647,6 +730,45 @@ CreateString -> CharFromString;
         function.call(&mut state);
         function.call(&mut state);
         assert_eq!(state.out_upd, 'c' as u8);
+      }
+    })
+  }
+
+  static TUPLE_TEST_STRING: &str = "
+module CreateTuple {
+  inp: reads Int;
+  out: writes (Int, String);
+
+  inp.onChange: out <- (inp, \"static string\");
+}
+
+module ReadTuple {
+  inp: reads (Int, String);
+  out1: writes Int;
+  out2: writes String;
+
+  inp.onChange: {
+    out1 <- inp[0];
+    out2 <- inp[1];
+  }
+}
+
+CreateTuple -> ReadTuple;
+  ";
+
+  state_struct!(CreateTuple, inp: u64, out: *const (u64, MemRegion));
+
+  #[test]
+  fn jit_create_tuple_codegen_runs() -> CodegenStatus {
+    ee_for_string(TUPLE_TEST_STRING, |ee: ExecutionEngine| {
+      unsafe {
+        let function: JitFunction<CreateTupleFunc> = ee.get_function("CreateTuple_update").unwrap();
+        let mut state = CreateTupleState {
+          inp: 0, inp_upd: 10, out: ptr::null(), out_upd: ptr::null(), bitfield: 0x1
+        };
+
+        function.call(&mut state);
+        println!("{:?}", state);
       }
     })
   }

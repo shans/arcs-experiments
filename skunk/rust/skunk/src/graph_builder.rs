@@ -42,13 +42,13 @@ fn types_match(left: &ast::Handle, right: &ast::Handle) -> bool {
   left.h_type == right.h_type
 }
 
-fn matching_connections<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast::Module) -> Vec<(&'a str, &'b str, ast::TypePrimitive)> {
+fn matching_connections<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast::Module) -> Vec<(&'a str, &'b str, ast::Type)> {
   let from_connections = from_module.outputs();
   let to_connections = to_module.inputs();
   from_connections.iter().map(|from_con| {
     to_connections.iter().filter_map(move |to_con| {
       if types_match(from_con, to_con) {
-        Some((from_con.name.as_str(), to_con.name.as_str(), from_con.h_type))
+        Some((from_con.name.as_str(), to_con.name.as_str(), from_con.h_type.clone()))
       } else {
         None
       }
@@ -56,10 +56,10 @@ fn matching_connections<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast
   }).flatten().collect()
 }
 
-fn only_matching_connection<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast::Module) -> (&'a str, &'b str, ast::TypePrimitive) {
+fn only_matching_connection<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast::Module) -> (&'a str, &'b str, ast::Type) {
   let matches = matching_connections(from_module, to_module);
   assert!(matches.len() == 1);
-  matches[0]
+  matches[0].clone()
 }
 
 fn expand_to_full_connection(modules: &Vec<&ast::Module>, graph: &mut graph::Graph, connection: &graph::Arrow) -> Result<(), GraphBuilderError> {

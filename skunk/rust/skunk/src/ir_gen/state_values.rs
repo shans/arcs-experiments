@@ -1,5 +1,5 @@
 use inkwell::AddressSpace;
-use inkwell::types::{StructType};
+use inkwell::types::{StructType, BasicTypeEnum, BasicType};
 use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
 
 use super::codegen_state::*;
@@ -24,9 +24,9 @@ use std::convert::TryInto;
 // StateValues are immediates that encode a value from/for a field. In particular,
 // you can store a StateValue in a field, and read a StateValue out of a field.
 
-pub fn memregion_ir_type<'ctx>(cg: &CodegenState<'ctx>) -> StructType<'ctx> {
+pub fn dptr_ir_type<'ctx>(cg: &CodegenState<'ctx>, primitive: BasicTypeEnum<'ctx>) -> StructType<'ctx> {
   cg.context.struct_type(&[
-    cg.context.i8_type().ptr_type(AddressSpace::Generic).into(),
+    primitive.ptr_type(AddressSpace::Generic).into(),
     cg.context.i64_type().into()
   ], false)
 }
@@ -39,25 +39,49 @@ pub fn memregion_size_ptr<'ctx>(cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>
   cg.builder.build_struct_gep(ptr, 1, "size").or(Err(CodegenError::InvalidStructPointer("MemRegion::size_ptr given bad state pointer".to_string())))
 }
 
-#[derive(PartialEq)]
-pub enum PointerKind {
-  SingleWordPrimitive, DynamicMemRegion, StaticMemRegion
-}
-
-pub trait Loadable<'ctx> {
-  fn load(&self, cg: &CodegenState<'ctx>, name: &str) -> CodegenResult<StateValue<'ctx>>;
-  fn clear(&self, cg: &CodegenState<'ctx>) -> CodegenStatus;
-}
-
 // The compiler views state field types as an array of type primitives. These will eventually
 // be canonicalized into a known order, to maximize compatibility.
+//
+// What do we want to represent?
+// (1) values that are directly inline. This should just be a Vec<TypePrimitive>
+//    i.e. vec!(Int, Char, Char) represents 2 contiguous words in memory
+// (2) pointers to regions of a known size. These are themselves a known size (1 word) and so can be directly inlined.
+//      (a) directly inlined values.
+//      (b) arrays of known size of direcly inlined values.
+// (3) pointers to runtime-sized regions. These are also a known size (2 words) and so can be directly inlined.
+// (4) MemRegions (as a special bottoming-out pointer-to-region-of-known-size primitive where more type information isn't available).
+//
+// So (Int, String) is vec!(Int, DynamicArrayOf(vec!(Char)))
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypePrimitive {
-  Int, Char, MemRegion, PointerTo(Box<Vec<TypePrimitive>>), FixedArrayOf(Box<Vec<TypePrimitive>>, u64), DynamicArrayOf(Box<Vec<TypePrimitive>>)
+  Int, Char, MemRegion, PointerTo(Vec<TypePrimitive>), FixedArrayOf(Vec<TypePrimitive>, u64), DynamicArrayOf(Vec<TypePrimitive>)
 }
 
-fn type_size(type_vec: &Vec<TypePrimitive>) -> CodegenResult<u64> {
-  panic!("Not implemented yet");
+// PointerKind describes operationally how a pointer should be treated. This includes an understanding of how to move values
+// between pointers, and how to inflate from a pointer to a StateValue
+#[derive(PartialEq)]
+pub enum PointerKind {
+  // Pointers 1 word or smaller; the actual size is given by the LLVM pointer type used
+  SingleWordPrimitive,
+  // A dynamically (runtime) sized region of heap (or whatever). The value is 2 words big: (data_ptr, size)
+  DynamicMemRegion,
+  // A statically sized region of heap (or whatever). Size is given by type.
+  StaticMemRegion
+}
+
+pub fn type_size(type_vec: &Vec<TypePrimitive>) -> u64 {
+  let mut size = 0;
+  for h_type in type_vec {
+    size += match h_type {
+      TypePrimitive::Int => 8,
+      TypePrimitive::Char => 1,
+      TypePrimitive::MemRegion => 16,
+      TypePrimitive::PointerTo(_x) => 8,
+      TypePrimitive::FixedArrayOf(_x, _s) => 8,
+      TypePrimitive::DynamicArrayOf(_x) => 16
+    };
+  }
+  size
 }
 
 pub struct StatePointer<'ctx> {
@@ -66,16 +90,42 @@ pub struct StatePointer<'ctx> {
   pub pointer_type: Vec<TypePrimitive> // this is a pointer *to* the type primitives, i.e. these aren't necessarily all PointerTo.
 }
 
+pub fn type_primitive_for_type(h_type: &ast::Type) -> Vec<TypePrimitive> {
+  match h_type {
+    ast::Type::Int => vec!(TypePrimitive::Int),
+    ast::Type::Char => vec!(TypePrimitive::Char),
+    ast::Type::MemRegion => vec!(TypePrimitive::MemRegion),
+    ast::Type::String => vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char))),
+    ast::Type::Tuple(members) => {
+      let member_vec = members.iter().map(|t| type_primitive_for_type(t)).flatten().collect();
+      if type_size(&member_vec) <= 16 {
+        member_vec
+      } else {
+        vec!(TypePrimitive::PointerTo(member_vec))
+      }
+    }
+  }
+}
+
+pub fn pointer_kind_for_type_primitive(primitive: &Vec<TypePrimitive>) -> PointerKind {
+  if primitive.len() != 1 {
+    panic!("Don't yet know how to deal with aggregate toplevel type primitives");
+  }
+  match &primitive[0] {
+    TypePrimitive::Int | TypePrimitive::Char => PointerKind::SingleWordPrimitive,
+    TypePrimitive::MemRegion => PointerKind::DynamicMemRegion,
+    TypePrimitive::DynamicArrayOf(_x) => PointerKind::DynamicMemRegion,
+    TypePrimitive::FixedArrayOf(_x, _s) => PointerKind::StaticMemRegion,
+    TypePrimitive::PointerTo(_x) => PointerKind::StaticMemRegion
+  }
+}
+
 impl <'ctx> StatePointer<'ctx> {
-  pub fn new(ptr: PointerValue<'ctx>, h_type: ast::TypePrimitive) -> Self {
+  pub fn new(ptr: PointerValue<'ctx>, h_type: ast::Type) -> Self {
     // h_type "should" match ptr.get_element_type() as the element type is derive (via the state struct)
     // from h_type.
-    let (pointer_kind, pointer_type) = match h_type {
-      ast::TypePrimitive::Int => (PointerKind::SingleWordPrimitive, vec!(TypePrimitive::Int)),
-      ast::TypePrimitive::Char => (PointerKind::SingleWordPrimitive, vec!(TypePrimitive::Char)),
-      ast::TypePrimitive::MemRegion => (PointerKind::DynamicMemRegion, vec!(TypePrimitive::MemRegion)),
-      ast::TypePrimitive::String => (PointerKind::DynamicMemRegion, vec!(TypePrimitive::DynamicArrayOf(Box::new(vec!(TypePrimitive::Char))))),
-    };
+    let pointer_type = type_primitive_for_type(&h_type);
+    let pointer_kind = pointer_kind_for_type_primitive(&pointer_type);
     StatePointer { pointer_kind, pointer: ptr, pointer_type } 
   }
   pub fn load(&self, cg: &CodegenState<'ctx>, name: &str) -> CodegenResult<StateValue<'ctx>> {
@@ -95,14 +145,18 @@ impl <'ctx> StatePointer<'ctx> {
       }
     }
   }
-  pub fn clear(&self, cg: &CodegenState<'ctx>) -> CodegenStatus {
+  // NOTE: This is *not* a general-purpose clear! It is not intended to set the pointed-at value
+  // back to some default state; it's used to null out the update pointer (or zero out an
+  // immediate value) after an update has been applied.
+  pub fn clear_update_pointer(&self, cg: &CodegenState<'ctx>) -> CodegenStatus {
     match self.pointer_kind {
       PointerKind::SingleWordPrimitive => {
         cg.builder.build_store(self.pointer, cg.uint_const(0));
         Ok(())
       }
       PointerKind::StaticMemRegion => {
-        panic!("Don't know what to do here");
+        cg.builder.build_store(self.pointer, self.pointer.get_type().const_null());
+        Ok(())
       }
       PointerKind::DynamicMemRegion => {
         cg.builder.build_store(memregion_data_ptr(cg, self.pointer)?, cg.uint_const(0));
@@ -123,8 +177,8 @@ pub enum ValueParts<'ctx> {
 
 #[derive(Debug)]
 pub struct StateValue<'ctx> {
-  value: ValueParts<'ctx>,
-  value_type: Vec<TypePrimitive>
+  pub value: ValueParts<'ctx>,
+  pub value_type: Vec<TypePrimitive>
 }
 
 impl <'ctx> StateValue<'ctx> {
@@ -136,6 +190,9 @@ impl <'ctx> StateValue<'ctx> {
   }
   pub fn new_dynamic_mem_region_of_type(data: PointerValue<'ctx>, size: IntValue<'ctx>, value_type: Vec<TypePrimitive>) -> Self {
     StateValue { value: ValueParts::DynamicMemRegion(data, size), value_type }
+  }
+  pub fn new_static_mem_region_of_type(data: PointerValue<'ctx>, value_type: Vec<TypePrimitive>) -> Self {
+    StateValue { value: ValueParts::StaticMemRegion(data), value_type}
   }
   pub fn new_none() -> Self {
     StateValue { value: ValueParts::None, value_type: Vec::new() }
@@ -183,7 +240,7 @@ impl <'ctx> StateValue<'ctx> {
           Ok(())
         } else if ptr.pointer_kind == PointerKind::DynamicMemRegion {
           cg.builder.build_store(memregion_data_ptr(cg, ptr.pointer)?, data);
-          cg.builder.build_store(memregion_size_ptr(cg, ptr.pointer)?, cg.uint_const(type_size(&ptr.pointer_type)?));
+          cg.builder.build_store(memregion_size_ptr(cg, ptr.pointer)?, cg.uint_const(type_size(&ptr.pointer_type)));
           Ok(())
         } else {
           Err(CodegenError::TypeMismatch("Attempt to store static-size region into non-region pointer".to_string()))
@@ -201,7 +258,7 @@ impl <'ctx> StateValue<'ctx> {
       ValueParts::DynamicMemRegion(_data, size) => {
         Ok(StateValue::new_int(size))
       }
-      ValueParts::StaticMemRegion(_data) => Ok(StateValue::new_int(cg.uint_const(type_size(&self.value_type)?))),
+      ValueParts::StaticMemRegion(_data) => Ok(StateValue::new_int(cg.uint_const(type_size(&self.value_type)))),
       ValueParts::None => Err(CodegenError::InvalidFunctionArgument("Can't call size() on None result".to_string()))
     }
   }
@@ -216,7 +273,7 @@ impl <'ctx> StateValue<'ctx> {
         value_ptr = cg.builder.build_gep(self.into_pointer_value()?, &[index.into_int_value()?], "lookup");
       }
       let value = cg.builder.build_load(value_ptr, "value");
-      Ok(StateValue::new_prim_of_type(value, (**element_type).clone()))
+      Ok(StateValue::new_prim_of_type(value, element_type.clone()))
     } else {
       Err(CodegenError::TypeMismatch("Can't perform array lookup on this".to_string()))
     }
