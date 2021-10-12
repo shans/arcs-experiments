@@ -125,6 +125,9 @@ impl <'ctx> StatePointer<'ctx> {
     // h_type "should" match ptr.get_element_type() as the element type is derive (via the state struct)
     // from h_type.
     let pointer_type = type_primitive_for_type(&h_type);
+    StatePointer::new_from_type_primitive(ptr, pointer_type)
+  }
+  pub fn new_from_type_primitive(ptr: PointerValue<'ctx>, pointer_type: Vec<TypePrimitive>) -> Self {
     let pointer_kind = pointer_kind_for_type_primitive(&pointer_type);
     StatePointer { pointer_kind, pointer: ptr, pointer_type } 
   }
@@ -194,9 +197,21 @@ impl <'ctx> StateValue<'ctx> {
   pub fn new_static_mem_region_of_type(data: PointerValue<'ctx>, value_type: Vec<TypePrimitive>) -> Self {
     StateValue { value: ValueParts::StaticMemRegion(data), value_type}
   }
+  pub fn new_tuple(cg: &CodegenState<'ctx>, tuple_type: Vec<TypePrimitive>) -> CodegenResult<Self> {
+    if let TypePrimitive::PointerTo(members) = &tuple_type[0] {
+      let tuple_size = type_size(&members);
+      let tuple_ptr = super::malloc(cg, cg.uint_const(tuple_size).into(), "tuple_memory").into_pointer_value();
+      let tuple_llvm_type = super::llvm_type_for_primitive(cg, &tuple_type);
+      let typed_tuple_ptr = cg.builder.build_bitcast(tuple_ptr, tuple_llvm_type, "ptr_as_struct_ptr").into_pointer_value();
+      Ok(StateValue::new_static_mem_region_of_type(typed_tuple_ptr, tuple_type))
+    } else {
+      Err(CodegenError::TypeMismatch("Attempt to construct tuple from non-tuple type".to_string()))
+    }
+  }
   pub fn new_none() -> Self {
     StateValue { value: ValueParts::None, value_type: Vec::new() }
   }
+
   pub fn into_int_value(&self) -> CodegenResult<IntValue<'ctx>> {
     if let ValueParts::SingleWordPrimitive(v) = self.value {
       Ok(v.into_int_value())
@@ -205,12 +220,30 @@ impl <'ctx> StateValue<'ctx> {
     }
   }
   pub fn into_pointer_value(&self) -> CodegenResult<PointerValue<'ctx>> {
-    if let ValueParts::DynamicMemRegion(ptr, _size) = self.value {
+    if let ValueParts::DynamicMemRegion(ptr, _) | ValueParts::StaticMemRegion(ptr) = self.value {
       Ok(ptr)
     } else {
       Err(CodegenError::TypeMismatch(std::format!("Can't into_pointer_value on ${:?}", self)))
     }
   }
+
+  fn only_value_type(&self) -> CodegenResult<&TypePrimitive> {
+    if self.value_type.len() != 1 {
+      return Err(CodegenError::TypeMismatch("Attempt to treat inline aggregate value as atomic value".to_string()));
+    } 
+    Ok(&self.value_type[0])
+  }
+
+  fn static_mem_region_members(&self) -> CodegenResult<&Vec<TypePrimitive>> {
+    let value_type = self.only_value_type()?;
+    if let TypePrimitive::PointerTo(elements) = value_type {
+      Ok(elements)
+    } else {
+      Err(CodegenError::TypeMismatch("Attempt to treat non-pointer type as pointer".to_string()))
+    }
+    
+  }
+
   pub fn store(&self, cg: &CodegenState<'ctx>, ptr: StatePointer<'ctx>) -> CodegenStatus {
     // TODO: more complex type comparison?
     if !(ptr.pointer_type == self.value_type) {
@@ -264,20 +297,37 @@ impl <'ctx> StateValue<'ctx> {
   }
   pub fn array_lookup(&self, cg: &CodegenState<'ctx>, index: StateValue<'ctx>) -> CodegenResult<Self> {
     // TODO: bounds checking when necessary
-    if self.value_type.len() != 1 {
-      return Err(CodegenError::TypeMismatch("Can't perform array lookup on this".to_string()));
-    }
-    if let TypePrimitive::DynamicArrayOf(element_type) = &self.value_type[0] {
-      let value_ptr;
-      unsafe {
-        value_ptr = cg.builder.build_gep(self.into_pointer_value()?, &[index.into_int_value()?], "lookup");
+    let value_type = self.only_value_type()?;
+    match value_type {
+      TypePrimitive::DynamicArrayOf(element_type) => {
+        let value_ptr;
+        unsafe {
+          value_ptr = cg.builder.build_gep(self.into_pointer_value()?, &[index.into_int_value()?], "lookup");
+        }
+        let value = cg.builder.build_load(value_ptr, "value");
+        Ok(StateValue::new_prim_of_type(value, element_type.clone()))
       }
-      let value = cg.builder.build_load(value_ptr, "value");
-      Ok(StateValue::new_prim_of_type(value, element_type.clone()))
-    } else {
-      Err(CodegenError::TypeMismatch("Can't perform array lookup on this".to_string()))
+      _otherwise => Err(CodegenError::TypeMismatch(format!("Can't perform array lookup on {:?}", self.value_type)))
     }
   } 
+  fn tuple_index_ptr(&self, cg: &CodegenState<'ctx>, index: u32) -> CodegenResult<StatePointer<'ctx>> {
+    let ptr = cg.builder.build_struct_gep(self.into_pointer_value()?, index as u32, "tuple_entry").or(Err(CodegenError::InvalidStructPointer("Bad tuple pointer".to_string())))?;
+
+    let members = self.static_mem_region_members()?;
+    let ptr_type = vec!(members[index as usize].clone());
+    Ok(StatePointer::new_from_type_primitive(ptr, ptr_type))
+  }
+  pub fn set_tuple_index(&self, cg: &CodegenState<'ctx>, index: u32, value: StateValue<'ctx>) -> CodegenStatus {
+    dbg!("SET_TUPLE_INDEX ${:?}", self);
+    // TODO: we should probably check if this type matches the expression type.
+    let typed_ptr = self.tuple_index_ptr(cg, index)?;
+    value.store(cg, typed_ptr)
+  }
+  pub fn get_tuple_index(&self, cg: &CodegenState<'ctx>, index: u32) -> CodegenResult<StateValue<'ctx>> {
+    dbg!("GET_TUPLE_INDEX ${:?}", self);
+    let typed_ptr = self.tuple_index_ptr(cg, index)?;
+    typed_ptr.load(cg, "tuple_at_idx")
+  }
 }
 
 pub enum UpdatePtrPurpose {

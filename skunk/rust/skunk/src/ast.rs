@@ -64,6 +64,7 @@ pub enum Expression {
   StringLiteral(String),
   IntLiteral(i64),
   Tuple(Vec<Expression>),
+  TupleLookup(Box<Expression>, i64)
 }
 
 #[derive(Debug, PartialEq, Clone)]

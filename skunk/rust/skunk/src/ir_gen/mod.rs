@@ -171,7 +171,7 @@ fn listener_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, listene
   let listener_name = (module, listener).fn_name();
   let function = cg.module.add_function(&listener_name, function_type, None);
 
-  statement_codegen(cg, module, &listener.statement, function)
+  listener_body_codegen(cg, module, &listener.statement, function)
 }
 
 fn state_alloca_for_module_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, function: FunctionValue<'ctx>) -> PointerValue<'ctx> {
@@ -181,11 +181,16 @@ fn state_alloca_for_module_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast:
   state_alloca
 }
 
-fn statement_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, statement: &ast::Statement, function: FunctionValue<'ctx>) -> CodegenStatus {
+fn listener_body_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, statement: &ast::Statement, function: FunctionValue<'ctx>) -> CodegenStatus {
   let entry_block = cg.context.append_basic_block(function, "entry");
   cg.builder.position_at_end(entry_block);
   let state_alloca = state_alloca_for_module_function(cg, module, function);
+  statement_codegen(cg, module, state_alloca, statement)?;
+  cg.builder.build_return(Option::None);
+  Ok(())
+}
 
+fn statement_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, state_alloca: PointerValue<'ctx>, statement: &ast::Statement) -> CodegenStatus {
   match statement {
     ast::Statement::Output(output_statement) => {
       let return_value = expression_codegen(cg, module, &output_statement.expression, state_alloca)?;
@@ -196,10 +201,11 @@ fn statement_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, statem
         let update_ptr = cg.update_ptr_for_field(module, state_ptr.into_pointer_value(), &output_statement.output, UpdatePtrPurpose::WriteAndSet)?;
         return_value.store(cg, update_ptr)?;
       }
-      cg.builder.build_return(Option::None);
     }
     ast::Statement::Block(statements) => {
-      panic!("can't handle blocks yet");
+      for statement in statements {
+        statement_codegen(cg, module, state_alloca, statement)?;
+      }
     }
   }
  Ok(())
@@ -235,6 +241,9 @@ fn expression_type(module: &ast::Module, expression: &ast::Expression) -> Codege
     ast::Expression::Tuple(exprs) => {
       let tuple_contents = exprs.iter().map(|expr| expression_type(module, expr)).flatten().flatten().collect();
       Ok(vec!(TypePrimitive::PointerTo(tuple_contents)))
+    }
+    ast::Expression::TupleLookup(expr, pos) => {
+      todo!("tuplelookup typing");
     }
   }
 }
@@ -317,24 +326,16 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
     ast::Expression::Tuple(entries) => {
       // TODO: this won't deal with inlined tuples; will need to create a new StateValue type for those.
       let tuple_type = expression_type(module, expression)?;
-      if let TypePrimitive::PointerTo(members) = &tuple_type[0] {
-        let tuple_size = type_size(&members);
-        let tuple_ptr = malloc(cg, cg.uint_const(tuple_size).into(), "tuple_memory").into_pointer_value();
-        let tuple_llvm_type = llvm_type_for_primitive(cg, &tuple_type);
-        let typed_tuple_ptr = cg.builder.build_bitcast(tuple_ptr, tuple_llvm_type, "ptr_as_struct_ptr").into_pointer_value();
-        for (idx, entry) in entries.iter().enumerate() {
-          let value = expression_codegen(cg, module, entry, state_alloca)?;
-          let ptr = cg.builder.build_struct_gep(typed_tuple_ptr, idx as u32, "tuple_entry").or(Err(CodegenError::InvalidStructPointer("Bad tuple pointer".to_string())))?;
-          // TODO: This should all be wrapped up in a StateValue for tuples maybe? Or something anyway.
-          let ptr_type = expression_type(module, entry)?;
-          let ptr_kind = pointer_kind_for_type_primitive(&ptr_type);
-          let typed_ptr = StatePointer { pointer_kind: ptr_kind, pointer_type: ptr_type, pointer: ptr };
-          value.store(cg, typed_ptr)?;
-        }
-        Ok(StateValue { value: ValueParts::StaticMemRegion(tuple_ptr), value_type: tuple_type })
-      } else {
-        panic!("Should not be possible");
+      let tuple_ptr = StateValue::new_tuple(cg, tuple_type)?;
+      for (idx, entry) in entries.iter().enumerate() {
+        let value = expression_codegen(cg, module, entry, state_alloca)?;
+        tuple_ptr.set_tuple_index(cg, idx as u32, value);
       }
+      Ok(tuple_ptr)
+    },
+    ast::Expression::TupleLookup(tuple_expr, pos) => {
+      let tuple = expression_codegen(cg, module, tuple_expr, state_alloca)?;
+      tuple.get_tuple_index(cg, *pos as u32)
     }
   }
 }
@@ -748,8 +749,8 @@ module ReadTuple {
   out2: writes String;
 
   inp.onChange: {
-    out1 <- inp[0];
-    out2 <- inp[1];
+    out1 <- inp.0;
+    out2 <- inp.1;
   }
 }
 
@@ -757,16 +758,24 @@ CreateTuple -> ReadTuple;
   ";
 
   state_struct!(CreateTuple, inp: u64, out: *const (u64, MemRegion));
+  state_struct!(ReadTuple, inp: *const (u64, MemRegion), out1: u64, out2: MemRegion);
+  state_struct!(TupleMain, inp: u64, out1: u64, out2: MemRegion, h0: *const (u64, MemRegion) | writer: CreateTupleState, reader: ReadTupleState);
 
   #[test]
   fn jit_create_tuple_codegen_runs() -> CodegenStatus {
     ee_for_string(TUPLE_TEST_STRING, |ee: ExecutionEngine| {
       unsafe {
-        let function: JitFunction<CreateTupleFunc> = ee.get_function("CreateTuple_update").unwrap();
-        let mut state = CreateTupleState {
-          inp: 0, inp_upd: 10, out: ptr::null(), out_upd: ptr::null(), bitfield: 0x1
+        let function: JitFunction<TupleMainFunc> = ee.get_function("Main_update").unwrap();
+        let mut state = TupleMainState {
+          inp: 0, inp_upd: 10, out1: 0, out1_upd: 0, out2: MemRegion::empty(), out2_upd: MemRegion::empty(), 
+          h0: ptr::null(), h0_upd: ptr::null(),
+          bitfield: 0x1,
+          writer: CreateTupleState { inp: 0, inp_upd: 00, out: ptr::null(), out_upd: ptr::null(), bitfield: 0x0 },
+          reader: ReadTupleState { inp: ptr::null(), inp_upd: ptr::null(), out1: 0, out1_upd: 0, out2: MemRegion::empty(), out2_upd: MemRegion::empty(), bitfield: 0x0}
         };
 
+        function.call(&mut state);
+        println!("{:?}", state);
         function.call(&mut state);
         println!("{:?}", state);
       }

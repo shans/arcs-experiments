@@ -9,8 +9,8 @@ use nom::{
   character::complete::{alpha1, char, multispace0, multispace1, digit1}, 
   combinator::{verify, eof, cut},
   error::{Error, ErrorKind, VerboseError, VerboseErrorKind},
-  multi::{separated_list0, separated_list1},
-  sequence::{tuple, delimited, terminated},
+  multi::{separated_list0, separated_list1, many0, many_till},
+  sequence::{tuple, delimited, terminated, preceded},
 };
 
 // use nom_supreme::error::ErrorTree;
@@ -140,24 +140,44 @@ fn expression(i: &str) -> ParseResult<ast::Expression> {
       result = ast::Expression::ArrayLookup(Box::new(result), Box::new(expr));
       remainder = input;
     } else {
-      break;
+      let test = preceded(char('.'), int_literal)(remainder);
+      if let Ok((input, ast::Expression::IntLiteral(literal))) = test {
+        result = ast::Expression::TupleLookup(Box::new(result), literal);
+        remainder = input
+      } else {
+        break;
+      }
     }
   }
   return Ok((remainder, result));
 }
 
-fn statement(i: &str) -> ParseResult<ast::Statement> {
-  let (input, (output_name, _, _, _, expr)) = cut(tuple((name, multispace0, tag("<-"), multispace0, expression)))(i)?;
+fn output_statement(i: &str) -> ParseResult<ast::Statement> {
+  let (input, (output_name, _, _, _, expr, _, _)) 
+    = cut(tuple((name, multispace0, tag("<-"), multispace0, expression, multispace0, char(';'))))(i)?;
   Ok((
     input,
     ast::Statement::Output(ast::OutputStatement { output: output_name.to_string(), expression: expr })
   ))
 }
 
+fn block_statement(i: &str) -> ParseResult<ast::Statement> {
+  let (input, (_, _, (statements, _))) = tuple((
+    char('{'),
+    multispace0,
+    many_till(terminated(statement, multispace0), char('}'))
+  ))(i)?;
+  Ok((input, ast::Statement::Block(statements)))
+}
+
+fn statement(i: &str) -> ParseResult<ast::Statement> {
+  alt((block_statement, output_statement))(i)
+}
+
 fn listener(i: &str) -> ParseResult<ast::Listener> {
-  let (input, (trigger, _, kind, _, (_, _, statement, _, _))) 
+  let (input, (trigger, _, kind, _, (_, _, statement))) 
     = tuple((name, char('.'), kind_token, multispace0, 
-        cut(tuple((char(':'), multispace0, statement, multispace0, char(';'))))))(i)?;
+        cut(tuple((char(':'), multispace0, statement)))))(i)?;
   Ok((
     input,
     ast::Listener {
@@ -320,6 +340,21 @@ mod tests {
           ast::OutputStatement {
             output: String::from("bar"), expression: ast::Expression::ReferenceToState(String:: from("far"))
           }
+        )}
+      ))
+    )
+  }
+
+  #[test]
+  fn parse_block_listener() {
+    assert_eq!(
+      listener("foo.onChange: {\n  bar <- far;\n  }"),
+      Ok((
+        "",
+        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Block (
+          vec!(ast::Statement::Output ( ast::OutputStatement {
+            output: String::from("bar"), expression: ast::Expression::ReferenceToState(String:: from("far"))
+          }))
         )}
       ))
     )
