@@ -5,6 +5,9 @@ use inkwell::passes::{PassManager, PassManagerBuilder};
 use inkwell::values::{FunctionValue, IntValue};
 use inkwell::targets::{TargetMachine, TargetTriple};
 
+use std::collections::HashMap;
+use super::state_values::*;
+
 #[derive(Debug, PartialEq)]
 pub enum CodegenError {
   BadListenerTrigger,
@@ -27,6 +30,7 @@ pub struct CodegenState<'ctx> {
   pub module: Module<'ctx>,
   pub builder: Builder<'ctx>,
   pub function_pass_manager: PassManager<FunctionValue<'ctx>>,
+  pub locals: HashMap<String, StateValue<'ctx>>
 }
 
 impl <'ctx> CodegenState<'ctx> {
@@ -39,12 +43,20 @@ impl <'ctx> CodegenState<'ctx> {
     let pass_manager_builder = PassManagerBuilder::create();
     let function_pass_manager = PassManager::create(&module);
     pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-    CodegenState { context, module, builder, function_pass_manager }
+    CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new() }
   }
 
   
   pub fn uint_const(&self, value: u64) -> IntValue<'ctx> {
     self.context.i64_type().const_int(value, false)
+  }
+
+  pub fn add_local(&mut self, name: &str, value: StateValue<'ctx>) {
+    self.locals.insert(name.to_string(), value);
+  }
+
+  pub fn get_local(&self, name: &str) -> Option<&StateValue<'ctx>> {
+    self.locals.get(name)
   }
 }
 
@@ -77,7 +89,7 @@ pub mod tests {
       let pass_manager_builder = PassManagerBuilder::create();
       let function_pass_manager = PassManager::create(&module);
       pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-      (CodegenState { context, module, builder, function_pass_manager }, execution_engine)
+      (CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new() }, execution_engine)
     }
   } 
 
@@ -106,7 +118,7 @@ pub mod tests {
       let pass_manager_builder = PassManagerBuilder::create();
       let function_pass_manager = PassManager::create(&module);
       pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-      CodegenState { context, module, builder, function_pass_manager }
+      CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new() }
     }
   }
 }

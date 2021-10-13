@@ -170,7 +170,7 @@ impl <'ctx> StatePointer<'ctx> {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ValueParts<'ctx> {
   None,
   SingleWordPrimitive(BasicValueEnum<'ctx>),
@@ -178,7 +178,7 @@ pub enum ValueParts<'ctx> {
   StaticMemRegion(PointerValue<'ctx>)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StateValue<'ctx> {
   pub value: ValueParts<'ctx>,
   pub value_type: Vec<TypePrimitive>
@@ -318,13 +318,11 @@ impl <'ctx> StateValue<'ctx> {
     Ok(StatePointer::new_from_type_primitive(ptr, ptr_type))
   }
   pub fn set_tuple_index(&self, cg: &CodegenState<'ctx>, index: u32, value: StateValue<'ctx>) -> CodegenStatus {
-    dbg!("SET_TUPLE_INDEX ${:?}", self);
     // TODO: we should probably check if this type matches the expression type.
     let typed_ptr = self.tuple_index_ptr(cg, index)?;
     value.store(cg, typed_ptr)
   }
   pub fn get_tuple_index(&self, cg: &CodegenState<'ctx>, index: u32) -> CodegenResult<StateValue<'ctx>> {
-    dbg!("GET_TUPLE_INDEX ${:?}", self);
     let typed_ptr = self.tuple_index_ptr(cg, index)?;
     typed_ptr.load(cg, "tuple_at_idx")
   }

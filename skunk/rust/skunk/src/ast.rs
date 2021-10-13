@@ -74,9 +74,16 @@ pub struct OutputStatement {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct LetStatement {
+  pub var_name: String,
+  pub expression: Expression
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum Statement {
   Output(OutputStatement),
-  Block(Vec<Statement>)
+  Block(Vec<Statement>),
+  Let(LetStatement),
 }
 
 #[derive(Debug, PartialEq, Clone)]

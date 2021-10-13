@@ -161,6 +161,15 @@ fn output_statement(i: &str) -> ParseResult<ast::Statement> {
   ))
 }
 
+fn let_statement(i: &str) -> ParseResult<ast::Statement> {
+  let (input, (_, _, var_name, _, _, _, expr, _, _))
+    = tuple((tag("let"), multispace1, name, multispace0, char('='), multispace0, expression, multispace0, char(';')))(i)?;
+  Ok((
+    input,
+    ast::Statement::Let(ast::LetStatement { var_name: var_name.to_string(), expression: expr })
+  ))
+}
+
 fn block_statement(i: &str) -> ParseResult<ast::Statement> {
   let (input, (_, _, (statements, _))) = tuple((
     char('{'),
@@ -171,7 +180,7 @@ fn block_statement(i: &str) -> ParseResult<ast::Statement> {
 }
 
 fn statement(i: &str) -> ParseResult<ast::Statement> {
-  alt((block_statement, output_statement))(i)
+  alt((block_statement, let_statement, output_statement))(i)
 }
 
 fn listener(i: &str) -> ParseResult<ast::Listener> {
