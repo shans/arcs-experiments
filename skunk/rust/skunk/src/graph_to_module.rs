@@ -169,13 +169,13 @@ impl <'a> ModuleContext<'a> {
                        .map(|handle_info| ast::Listener {
                          trigger: handle_info.handle.name.clone(),
                          kind: ast::ListenerKind::OnWrite,
-                         statement: ast::Statement::Output (ast::OutputStatement {
+                         implementation: ast::ExpressionValue::Output (ast::OutputExpression {
                            output: "".to_string(), // TODO: this should be the field(s) that get(s) copied back; but in practice that's inferred from the submodule
-                           expression: ast::Expression::CopyToSubModule(ast::CopyTo {
+                           expression: Box::new(ast::ExpressionValue::CopyToSubModule(ast::CopyTo {
                              state: handle_info.handle.name.clone(),
                              submodule_index: handle_info.writes_to_submodule,
                              submodule_state: handle_info.submodule_handle.clone(),
-                           })
+                           }))
                          })
                        })
                   .collect()

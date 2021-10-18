@@ -41,6 +41,7 @@ fn llvm_type_for_primitive<'ctx>(cg: &CodegenState<'ctx>, primitive_type: &Vec<T
     match &primitive_type[0] {
       TypePrimitive::Int => cg.context.i64_type().into(),
       TypePrimitive::Char => cg.context.i8_type().into(),
+      TypePrimitive::Bool => cg.context.custom_width_int_type(1).into(),
       TypePrimitive::MemRegion => dptr_ir_type(cg, cg.context.i8_type().into()).into(),
       TypePrimitive::DynamicArrayOf(x) => dptr_ir_type(cg, llvm_type_for_primitive(cg, &x).into()).into(),
       TypePrimitive::PointerTo(x) => llvm_type_for_primitive(cg, x).ptr_type(AddressSpace::Generic).into(),
@@ -171,7 +172,7 @@ fn listener_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, lis
   let listener_name = (module, listener).fn_name();
   let function = cg.module.add_function(&listener_name, function_type, None);
 
-  listener_body_codegen(cg, module, &listener.statement, function)
+  listener_body_codegen(cg, module, &listener.implementation, function)
 }
 
 fn state_alloca_for_module_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, function: FunctionValue<'ctx>) -> PointerValue<'ctx> {
@@ -181,46 +182,36 @@ fn state_alloca_for_module_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast:
   state_alloca
 }
 
-fn listener_body_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, statement: &ast::Statement, function: FunctionValue<'ctx>) -> CodegenStatus {
+fn listener_body_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, implementation: &ast::ExpressionValue, function: FunctionValue<'ctx>) -> CodegenStatus {
   let entry_block = cg.context.append_basic_block(function, "entry");
   cg.builder.position_at_end(entry_block);
   let state_alloca = state_alloca_for_module_function(cg, module, function);
-  statement_codegen(cg, module, state_alloca, statement)?;
+  expression_codegen(cg, module, state_alloca, implementation)?;
   cg.builder.build_return(Option::None);
   Ok(())
 }
 
-fn statement_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, state_alloca: PointerValue<'ctx>, statement: &ast::Statement) -> CodegenStatus {
-  match statement {
-    ast::Statement::Output(output_statement) => {
-      let return_value = expression_codegen(cg, module, &output_statement.expression, state_alloca)?;
-      // statement.output == "" is a workaround for an effectful expression (e.g. a CopyToSubModule). This is an 'orrible 'ack and should
-      // be reverted once it's possible to track effected fields from CopyToSubModule + return a fieldSet for update.
-      if output_statement.output.len() > 0 {
-        let state_ptr = cg.builder.build_load(state_alloca, "state_ptr");
-        let update_ptr = cg.update_ptr_for_field(module, state_ptr.into_pointer_value(), &output_statement.output, UpdatePtrPurpose::WriteAndSet)?;
-        return_value.store(cg, update_ptr)?;
-      }
-    }
-    ast::Statement::Block(statements) => {
-      for statement in statements {
-        statement_codegen(cg, module, state_alloca, statement)?;
-      }
-    }
-    ast::Statement::Let(let_statement) => {
-      let value = expression_codegen(cg, module, &let_statement.expression, state_alloca)?;
-      cg.add_local(&let_statement.var_name, value);
-    }
-  }
- Ok(())
-}
-
 // Type inference it aint, but this'll do for now.
-fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expression: &ast::Expression) -> CodegenResult<Vec<TypePrimitive>> {
+fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expression: &ast::ExpressionValue) -> CodegenResult<Vec<TypePrimitive>> {
   match expression {
-    ast::Expression::IntLiteral(_) => Ok(vec!(TypePrimitive::Int)),
-    ast::Expression::StringLiteral(_) => Ok(vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char)))),
-    ast::Expression::ArrayLookup(arr_exp, _) => {
+    ast::ExpressionValue::Output(output_expression) => expression_type(cg, module, output_expression.expression.as_ref()),
+    ast::ExpressionValue::Block(expressions) => {
+      if expressions.len() > 0 {
+        expression_type(cg, module, &expressions[expressions.len() - 1])
+      } else {
+        Ok(Vec::new())
+      }
+    }
+    ast::ExpressionValue::Let(let_expression) => {
+      expression_type(cg, module, let_expression.expression.as_ref())
+    }
+    ast::ExpressionValue::If(if_expression) => todo!("Implement if expression typing"),
+
+    ast::ExpressionValue::Empty => Ok(Vec::new()),
+
+    ast::ExpressionValue::IntLiteral(_) => Ok(vec!(TypePrimitive::Int)),
+    ast::ExpressionValue::StringLiteral(_) => Ok(vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char)))),
+    ast::ExpressionValue::ArrayLookup(arr_exp, _) => {
       let arr_type = expression_type(cg, module, arr_exp)?;
       if arr_type.len() != 1 {
         Err(CodegenError::TypeMismatch("array lookup on non-array".to_string()))
@@ -230,15 +221,15 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
         Err(CodegenError::TypeMismatch("array lookup on non-array".to_string()))
       }
     }
-    ast::Expression::CopyToSubModule(_) => Ok(Vec::new()),
-    ast::Expression::Function(name, _) => {
+    ast::ExpressionValue::CopyToSubModule(_) => Ok(Vec::new()),
+    ast::ExpressionValue::FunctionCall(name, _) => {
       match name.as_str() {
         "new" => Ok(vec!(TypePrimitive::MemRegion)),
         "size" => Ok(vec!(TypePrimitive::Int)),
         _name => panic!("Don't know function {}", name)
       }
     }
-    ast::Expression::ReferenceToState(field) => {
+    ast::ExpressionValue::ReferenceToState(field) => {
       if let Some(local) = cg.get_local(field) {
         Ok(local.value_type.clone())
       } else {
@@ -246,19 +237,74 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
         Ok(type_primitive_for_type(&h_type))
       }
     }
-    ast::Expression::Tuple(exprs) => {
+    ast::ExpressionValue::Tuple(exprs) => {
       let tuple_contents = exprs.iter().map(|expr| expression_type(cg, module, expr)).flatten().flatten().collect();
       Ok(vec!(TypePrimitive::PointerTo(tuple_contents)))
     }
-    ast::Expression::TupleLookup(expr, pos) => {
+    ast::ExpressionValue::TupleLookup(expr, pos) => {
       todo!("tuplelookup typing");
     }
+    ast::ExpressionValue::BinaryOperator(lhs, op, rhs) => todo!("Implement binary operation typing"),
   }
 }
 
-fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expression: &ast::Expression, state_alloca: PointerValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, state_alloca: PointerValue<'ctx>, expression: &ast::ExpressionValue) -> CodegenResult<StateValue<'ctx>> {
   match expression {
-    ast::Expression::ReferenceToState(field) => {
+    ast::ExpressionValue::Output(output_expression) => {
+      let return_value = expression_codegen(cg, module, state_alloca, &output_expression.expression)?;
+      // expression.output == "" is a workaround for an effectful subexpression (e.g. a CopyToSubModule). This is an 'orrible 'ack and should
+      // be reverted once it's possible to track effected fields from CopyToSubModule + return a fieldSet for update.
+      if output_expression.output.len() > 0 {
+        let state_ptr = cg.builder.build_load(state_alloca, "state_ptr");
+        let update_ptr = cg.update_ptr_for_field(module, state_ptr.into_pointer_value(), &output_expression.output, UpdatePtrPurpose::WriteAndSet)?;
+        return_value.store(cg, update_ptr)?;
+      }
+      Ok(return_value)
+    }
+    ast::ExpressionValue::Block(expressions) => {
+      let mut final_result = StateValue::new_none();
+      for expression in expressions {
+        final_result = expression_codegen(cg, module, state_alloca, expression)?;
+      }
+      Ok(final_result)
+    }
+    ast::ExpressionValue::Let(let_expression) => {
+      let value = expression_codegen(cg, module, state_alloca, &let_expression.expression)?;
+      cg.add_local(&let_expression.var_name, value.clone());
+      Ok(value)
+    }
+
+    ast::ExpressionValue::If(if_expression) => {
+      let test = expression_codegen(cg, module, state_alloca, if_expression.test.as_ref())?;
+      // TODO: test should be forced to be a boolean expression rather than just something that can be intified.
+      let test_as_int = test.into_int_value()?;
+      let test_against = test_as_int.get_type().const_zero();
+      let cmp = cg.builder.build_int_compare(IntPredicate::NE, test_as_int, test_against, "if_true");
+      let if_true = append_new_block(cg, "if_true_block")?;
+      let if_false = append_new_block(cg, "if_false_block")?;
+      let after_if = append_new_block(cg, "after_if")?;
+      cg.builder.build_conditional_branch(cmp, if_true, if_false);
+      cg.builder.position_at_end(if_true);
+      let result_if_true = expression_codegen(cg, module, state_alloca, if_expression.if_true.as_ref())?;
+      cg.builder.build_unconditional_branch(after_if);
+      cg.builder.position_at_end(if_false);
+      let result_if_false = expression_codegen(cg, module, state_alloca, if_expression.if_false.as_ref())?;
+      cg.builder.build_unconditional_branch(after_if);
+      cg.builder.position_at_end(after_if);
+
+      if result_if_true.is_none() {
+        Ok(result_if_true)
+      } else {
+        let phi = cg.builder.build_phi(result_if_true.llvm_type(), "if_result");
+        result_if_true.add_to_phi_node(phi, if_true)?;
+        result_if_false.add_to_phi_node(phi, if_false)?;
+        Ok(StateValue::new_int(phi.as_basic_value().into_int_value()))
+      }
+    }
+
+    ast::ExpressionValue::Empty => Ok(StateValue::new_none()),
+
+    ast::ExpressionValue::ReferenceToState(field) => {
       if let Some(local) = cg.get_local(field) {
         Ok((*local).clone())
       } else {
@@ -267,7 +313,7 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
         value_ptr.load(cg, &("ref_to_state_".to_string() + field))
       }
     }
-    ast::Expression::CopyToSubModule(info) => {
+    ast::ExpressionValue::CopyToSubModule(info) => {
       let state_ptr = cg.builder.build_load(state_alloca, "state_ptr").into_pointer_value();
       let from_value_ptr = cg.read_ptr_for_field(module, state_ptr, &info.state)?;
       let submodule_state_ptr = cg.submodule_ptr(module, state_ptr, info.submodule_index)?;
@@ -305,8 +351,8 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
 
       Ok(StateValue::new_none())
     }
-    ast::Expression::Function(name, expression) => {
-      let value = expression_codegen(cg, module, expression, state_alloca)?;
+    ast::ExpressionValue::FunctionCall(name, expression) => {
+      let value = expression_codegen(cg, module, state_alloca, expression)?;
       match name.as_str() {
         "new" => {
           let size = value.into_int_value()?;
@@ -314,7 +360,7 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
           Ok(StateValue::new_dynamic_mem_region_of_type(raw_location, size, vec!(TypePrimitive::MemRegion)))
         }
         "size" => {
-          let value = expression_codegen(cg, module, expression, state_alloca)?;
+          let value = expression_codegen(cg, module, state_alloca, expression)?;
           value.size(cg)
         }
         _name => {
@@ -322,32 +368,39 @@ fn expression_codegen<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expre
         }
       }
     }
-    ast::Expression::StringLiteral(literal) => {
+    ast::ExpressionValue::StringLiteral(literal) => {
       let size = cg.context.i64_type().const_int(literal.len().try_into().unwrap(), false);
       let string = cg.builder.build_global_string_ptr(literal, "literal");
       Ok(StateValue::new_dynamic_mem_region_of_type(string.as_pointer_value(), size, vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char)))))
     }
-    ast::Expression::IntLiteral(literal) => {
+    ast::ExpressionValue::IntLiteral(literal) => {
       Ok(StateValue::new_int(cg.uint_const(*literal as u64)))
     }
-    ast::Expression::ArrayLookup(value, index) => {
-      let arr_ptr = expression_codegen(cg, module, value, state_alloca)?;
-      let idx = expression_codegen(cg, module, index, state_alloca)?;
+    ast::ExpressionValue::ArrayLookup(value, index) => {
+      let arr_ptr = expression_codegen(cg, module, state_alloca, value)?;
+      let idx = expression_codegen(cg, module, state_alloca, index)?;
       arr_ptr.array_lookup(cg, idx)
     }
-    ast::Expression::Tuple(entries) => {
+    ast::ExpressionValue::Tuple(entries) => {
       // TODO: this won't deal with inlined tuples; will need to create a new StateValue type for those.
       let tuple_type = expression_type(cg, module, expression)?;
       let tuple_ptr = StateValue::new_tuple(cg, tuple_type)?;
       for (idx, entry) in entries.iter().enumerate() {
-        let value = expression_codegen(cg, module, entry, state_alloca)?;
+        let value = expression_codegen(cg, module, state_alloca, entry)?;
         tuple_ptr.set_tuple_index(cg, idx as u32, value);
       }
       Ok(tuple_ptr)
     },
-    ast::Expression::TupleLookup(tuple_expr, pos) => {
-      let tuple = expression_codegen(cg, module, tuple_expr, state_alloca)?;
+    ast::ExpressionValue::TupleLookup(tuple_expr, pos) => {
+      let tuple = expression_codegen(cg, module, state_alloca, tuple_expr)?;
       tuple.get_tuple_index(cg, *pos as u32)
+    },
+    ast::ExpressionValue::BinaryOperator(lhs, op, rhs) => {
+      let lhs_value = expression_codegen(cg, module, state_alloca, lhs)?;
+      let rhs_value = expression_codegen(cg, module, state_alloca, rhs)?;
+      match op {
+        ast::Operator::Equality => lhs_value.equals(cg, &rhs_value)
+      }
     }
   }
 }
@@ -446,9 +499,9 @@ mod tests {
                     ast::Handle { name: String::from("far"), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
                     ast::Handle { name: String::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
                   ),
-      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
-        ast::OutputStatement {
-          output: String::from("bar"), expression: ast::Expression::ReferenceToState(String::from("far"))
+      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
+        ast::OutputExpression {
+          output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState(String::from("far")))
         }
       )}),
       submodules: Vec::new(),
@@ -459,9 +512,9 @@ mod tests {
      ast::Module {
       name: String::from("InvalidModule"),
       handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
-      listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
-        ast::OutputStatement {
-          output: String::from("foo"), expression: ast::Expression::ReferenceToState(String::from("foo"))
+      listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
+        ast::OutputExpression {
+          output: String::from("foo"), expression: Box::new(ast::ExpressionValue::ReferenceToState(String::from("foo")))
         })
       }),
       submodules: Vec::new(),
@@ -527,6 +580,10 @@ mod tests {
   impl MemRegion {
     fn empty() -> Self {
       MemRegion { data: 0, size: 0 }
+    }
+    fn from_str(data: &'static str) -> Self {
+      let size = data.len() as u64;
+      MemRegion { data: data.as_ptr() as u64, size }
     }
   }
 
@@ -798,14 +855,21 @@ CreateTuple -> ReadTuple;
 module SyntaxTest {
   input: reads (String, Int);
   output: writes (String, Int);
-  outputInt:  writes Int;
+  outputInt: writes Int;
 
-  input.onWrite: {
+  input.onChange: {
     let offset = input.1;
+    if offset == size(input.0) {
+      output <- input;
+    }
     outputInt <- offset;
   }
 }
   ";
+
+/*
+
+*/
 
   state_struct!(SyntaxTest, inp: *const (MemRegion, u64), out: *const(MemRegion, u64), outputInt: u64);
 
@@ -814,9 +878,13 @@ module SyntaxTest {
     ee_for_string(SYNTAX_TEST_STRING, |ee: ExecutionEngine| {
       unsafe {
         let function: JitFunction<SyntaxTestFunc> = ee.get_function("SyntaxTest_update").unwrap();
-        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::empty(), 24), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
+        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
-        println!("{:?}", state);
+        assert_eq!(state.inp, state.out_upd);
+        assert_eq!(state.bitfield, 0x6); // outputInt and output both updated
+        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 24), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
+        function.call(&mut state);
+        assert_eq!(state.bitfield, 0x4); // only outputInt updated
       }
     }) 
   }

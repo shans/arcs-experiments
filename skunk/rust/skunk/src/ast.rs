@@ -12,6 +12,7 @@ pub enum Type {
   Int,
   String,
   Char,
+  Bool,
   MemRegion,
   Tuple(Vec<Type>)
 }
@@ -56,41 +57,83 @@ pub struct CopyTo {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Expression {
-  ArrayLookup(Box<Expression>, Box<Expression>),
+pub enum Operator {
+  Equality
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Expression {
+  pub value: ExpressionValue,
+  pub is_terminated: bool
+}
+
+impl Expression {
+  pub fn terminated(value: ExpressionValue) -> Self {
+    Expression { value, is_terminated: true }
+  }
+  pub fn unterminated(value: ExpressionValue) -> Self {
+    Expression { value, is_terminated: false }
+  }
+  pub fn empty() -> Self {
+    Expression::unterminated(ExpressionValue::Empty)
+  }
+  pub fn state_reference(state: &str) -> Self {
+    Expression::unterminated(ExpressionValue::ReferenceToState(state.to_string()))
+  }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum ExpressionValue {
+  // statement-like
+  Output(OutputExpression),
+  Block(Vec<ExpressionValue>),
+  Let(LetExpression),
+  If(IfExpression),
+
+  Empty, // used to terminate Blocks with no return
+
+  // expression-like
+  ArrayLookup(Box<ExpressionValue>, Box<ExpressionValue>),
   ReferenceToState(String),
   CopyToSubModule(CopyTo),
-  Function(String, Box<Expression>),
+  FunctionCall(String, Box<ExpressionValue>),
   StringLiteral(String),
   IntLiteral(i64),
-  Tuple(Vec<Expression>),
-  TupleLookup(Box<Expression>, i64)
+  Tuple(Vec<ExpressionValue>),
+  TupleLookup(Box<ExpressionValue>, i64),
+  BinaryOperator(Box<ExpressionValue>, Operator, Box<ExpressionValue>)
+}
+
+impl From<Expression> for ExpressionValue {
+  fn from(expr: Expression) -> ExpressionValue {
+    expr.value
+  }
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct OutputStatement {
+pub struct OutputExpression {
   pub output: String,
-  pub expression: Expression,
+  pub expression: Box<ExpressionValue>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct LetStatement {
+pub struct LetExpression {
   pub var_name: String,
-  pub expression: Expression
+  pub expression: Box<ExpressionValue>
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Statement {
-  Output(OutputStatement),
-  Block(Vec<Statement>),
-  Let(LetStatement),
+pub struct IfExpression {
+  pub test: Box<ExpressionValue>,
+  pub if_true: Box<ExpressionValue>,
+  pub if_false: Box<ExpressionValue>
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Listener {
   pub trigger: String,
   pub kind: ListenerKind,
-  pub statement: Statement,
+  pub implementation: ExpressionValue,
 }
 
 #[derive(Debug, PartialEq, Clone)]

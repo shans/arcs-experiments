@@ -1,6 +1,7 @@
-use inkwell::AddressSpace;
+use inkwell::{AddressSpace, IntPredicate};
+use inkwell::basic_block::BasicBlock;
 use inkwell::types::{StructType, BasicTypeEnum, BasicType};
-use inkwell::values::{BasicValueEnum, IntValue, PointerValue};
+use inkwell::values::{BasicValueEnum, IntValue, PointerValue, PhiValue};
 
 use super::codegen_state::*;
 use super::ast;
@@ -54,7 +55,7 @@ pub fn memregion_size_ptr<'ctx>(cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>
 // So (Int, String) is vec!(Int, DynamicArrayOf(vec!(Char)))
 #[derive(Clone, Debug, PartialEq)]
 pub enum TypePrimitive {
-  Int, Char, MemRegion, PointerTo(Vec<TypePrimitive>), FixedArrayOf(Vec<TypePrimitive>, u64), DynamicArrayOf(Vec<TypePrimitive>)
+  Int, Char, Bool, MemRegion, PointerTo(Vec<TypePrimitive>), FixedArrayOf(Vec<TypePrimitive>, u64), DynamicArrayOf(Vec<TypePrimitive>)
 }
 
 // PointerKind describes operationally how a pointer should be treated. This includes an understanding of how to move values
@@ -74,7 +75,7 @@ pub fn type_size(type_vec: &Vec<TypePrimitive>) -> u64 {
   for h_type in type_vec {
     size += match h_type {
       TypePrimitive::Int => 8,
-      TypePrimitive::Char => 1,
+      TypePrimitive::Char | TypePrimitive::Bool => 1,
       TypePrimitive::MemRegion => 16,
       TypePrimitive::PointerTo(_x) => 8,
       TypePrimitive::FixedArrayOf(_x, _s) => 8,
@@ -94,6 +95,7 @@ pub fn type_primitive_for_type(h_type: &ast::Type) -> Vec<TypePrimitive> {
   match h_type {
     ast::Type::Int => vec!(TypePrimitive::Int),
     ast::Type::Char => vec!(TypePrimitive::Char),
+    ast::Type::Bool => vec!(TypePrimitive::Bool),
     ast::Type::MemRegion => vec!(TypePrimitive::MemRegion),
     ast::Type::String => vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char))),
     ast::Type::Tuple(members) => {
@@ -112,7 +114,7 @@ pub fn pointer_kind_for_type_primitive(primitive: &Vec<TypePrimitive>) -> Pointe
     panic!("Don't yet know how to deal with aggregate toplevel type primitives");
   }
   match &primitive[0] {
-    TypePrimitive::Int | TypePrimitive::Char => PointerKind::SingleWordPrimitive,
+    TypePrimitive::Int | TypePrimitive::Char | TypePrimitive::Bool => PointerKind::SingleWordPrimitive,
     TypePrimitive::MemRegion => PointerKind::DynamicMemRegion,
     TypePrimitive::DynamicArrayOf(_x) => PointerKind::DynamicMemRegion,
     TypePrimitive::FixedArrayOf(_x, _s) => PointerKind::StaticMemRegion,
@@ -188,6 +190,9 @@ impl <'ctx> StateValue<'ctx> {
   pub fn new_int(value: IntValue<'ctx>) -> Self {
     StateValue::new_prim_of_type(value.into(), vec!(TypePrimitive::Int))
   }
+  pub fn new_bool(value: IntValue<'ctx>) -> Self {
+    StateValue::new_prim_of_type(value.into(), vec!(TypePrimitive::Bool))
+  }
   pub fn new_prim_of_type(value: BasicValueEnum<'ctx>, value_type: Vec<TypePrimitive>) -> Self {
     StateValue { value: ValueParts::SingleWordPrimitive(value), value_type }
   }
@@ -224,6 +229,21 @@ impl <'ctx> StateValue<'ctx> {
       Ok(ptr)
     } else {
       Err(CodegenError::TypeMismatch(std::format!("Can't into_pointer_value on ${:?}", self)))
+    }
+  }
+
+  pub fn llvm_type(&self) -> BasicTypeEnum<'ctx> {
+    match self.value {
+      ValueParts::SingleWordPrimitive(value) => value.get_type(),
+      ValueParts::DynamicMemRegion(ptr, _) | ValueParts::StaticMemRegion(ptr) => ptr.get_type().into(),
+      ValueParts::None => panic!("dunno!"),
+    }
+  }
+  pub fn is_none(&self) -> bool {
+    if let ValueParts::None = self.value {
+      true
+    } else {
+      false
     }
   }
 
@@ -325,6 +345,26 @@ impl <'ctx> StateValue<'ctx> {
   pub fn get_tuple_index(&self, cg: &CodegenState<'ctx>, index: u32) -> CodegenResult<StateValue<'ctx>> {
     let typed_ptr = self.tuple_index_ptr(cg, index)?;
     typed_ptr.load(cg, "tuple_at_idx")
+  }
+  pub fn add_to_phi_node(&self, node: PhiValue, block: BasicBlock<'ctx>) -> CodegenStatus {
+    // TODO: non-unitary types
+    let value_type = self.only_value_type()?;
+    match value_type {
+      TypePrimitive::Char | TypePrimitive::Int => node.add_incoming(&[(&self.into_int_value()?, block)]),
+      _ => todo!("phi node processing for non-primitive types")
+    }
+    Ok(())
+  }
+  pub fn equals(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    // TODO: compound type equality
+    let value_type = self.only_value_type()?;
+    match value_type {
+      TypePrimitive::Char | TypePrimitive::Int | TypePrimitive::Bool => {
+        let result = cg.builder.build_int_compare(IntPredicate::EQ, self.into_int_value()?, other.into_int_value()?, "eq");
+        Ok(StateValue::new_bool(result))
+      }
+      _ => todo!("Equality for non-primitive types")
+    }
   }
 }
 

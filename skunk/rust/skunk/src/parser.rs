@@ -7,7 +7,7 @@ use nom::{
   branch::alt,
   bytes::complete::{tag, is_a, take_until},
   character::complete::{alpha1, char, multispace0, multispace1, digit1}, 
-  combinator::{verify, eof, cut},
+  combinator::{verify, eof, cut, opt},
   error::{Error, ErrorKind, VerboseError, VerboseErrorKind},
   multi::{separated_list0, separated_list1, many0, many_till},
   sequence::{tuple, delimited, terminated, preceded},
@@ -60,6 +60,7 @@ fn type_primitive_token(i: &str) -> ParseResult<ast::Type> {
     token("String", ast::Type::String),
     token("MemRegion", ast::Type::MemRegion),
     token("Char", ast::Type::Char),
+    token("Bool", ast::Type::Bool),
   ))(i)
 }
 
@@ -97,22 +98,22 @@ fn kind_token(i: &str) -> ParseResult<ast::ListenerKind> {
 }
 
 fn state_reference(i: &str) -> ParseResult<ast::Expression> {
-  name(i).map(|(rest, state_elt)| (rest, ast::Expression::ReferenceToState(state_elt.to_string())))
+  name(i).map(|(rest, state_elt)| (rest, ast::Expression::unterminated(ast::ExpressionValue::ReferenceToState(state_elt.to_string()))))
 }
 
 fn int_literal(i: &str) -> ParseResult<ast::Expression> {
   let (input, const_int) = digit1(i)?;
-  Ok((input, ast::Expression::IntLiteral(const_int.parse::<i64>().unwrap())))
+  Ok((input, ast::Expression::unterminated(ast::ExpressionValue::IntLiteral(const_int.parse::<i64>().unwrap()))))
 }
 
 fn string_literal(i: &str) -> ParseResult<ast::Expression> {
   let (input, (_, literal, _)) = tuple((char('"'), take_until("\""), char('"')))(i)?;
-  Ok((input, ast::Expression::StringLiteral(literal.to_string())))
+  Ok((input, ast::Expression::unterminated(ast::ExpressionValue::StringLiteral(literal.to_string()))))
 }
 
 fn tuple_expression(i: &str) -> ParseResult<ast::Expression> {
-  let (input, members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression), char(')'))(i)?;
-  Ok((input, ast::Expression::Tuple(members)))
+  let (input, mut members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression), char(')'))(i)?;
+  Ok((input, ast::Expression::unterminated(ast::ExpressionValue::Tuple(members.drain(..).map(|a| a.value).collect()))))
 }
 
 fn function(i: &str) -> ParseResult<ast::Expression> {
@@ -120,79 +121,144 @@ fn function(i: &str) -> ParseResult<ast::Expression> {
   let (input, (f_name, _, _, _, f_arg, _, _)) = tuple((name, multispace0, char('('), multispace0, expression, multispace0, char(')')))(i)?;
   Ok((
     input,
-    ast::Expression::Function(f_name.to_string(), Box::new(f_arg))
+    ast::Expression::unterminated(ast::ExpressionValue::FunctionCall(f_name.to_string(), Box::new(f_arg.into())))
   ))
 }
 
-fn expression(i: &str) -> ParseResult<ast::Expression> {
-  let (input, expr) = alt((
-    int_literal,
-    string_literal, 
-    tuple_expression,
-    function, 
-    state_reference
-  ))(i)?;
-  let mut result = expr;
-  let mut remainder = input;
-  while true {
-    let test = delimited(char('['), expression, char(']'))(remainder);
-    if let Ok((input, expr)) = test {
-      result = ast::Expression::ArrayLookup(Box::new(result), Box::new(expr));
-      remainder = input;
+// Expression cases
+// some places require a terminated expression (either a block or an expression with a trailing ';')
+//  - listeners
+//  - function bodies
+//  - non-terminal expressions in blocks
+//
+//  - it's OK to terminate a block but not required. This is best viewed as a block expression followed by an empty (terminated) expression
+//
+// so a terminated expression is a block, or a non-block expression with a ';'
+// a non-block expression is (everything except block), or a block with trailing components
+
+fn operator(i: &str) -> ParseResult<ast::Operator> {
+  token("==", ast::Operator::Equality)(i)
+}
+
+fn expression_modifier(i: &str, expr: ast::Expression) -> ParseResult<ast::Expression> {
+  let test = delimited(char('['), expression, char(']'))(i);
+  if let Ok((input, value)) = test {
+    Ok((input, ast::Expression::unterminated(ast::ExpressionValue::ArrayLookup(Box::new(expr.into()), Box::new(value.into())))))
+  } else {
+    let test = preceded(char('.'), int_literal)(i);
+    if let Ok((input, ast::Expression { value: ast::ExpressionValue::IntLiteral(literal), is_terminated: _ })) = test {
+      Ok((input, ast::Expression::unterminated(ast::ExpressionValue::TupleLookup(Box::new(expr.into()), literal))))
     } else {
-      let test = preceded(char('.'), int_literal)(remainder);
-      if let Ok((input, ast::Expression::IntLiteral(literal))) = test {
-        result = ast::Expression::TupleLookup(Box::new(result), literal);
-        remainder = input
-      } else {
-        break;
+      let test = tuple((preceded(multispace0, operator), preceded(multispace0, expression)))(i);
+      match test {
+        Ok((input, (operator, rhs))) => Ok((input, ast::Expression { is_terminated: rhs.is_terminated, value: ast::ExpressionValue::BinaryOperator(Box::new(expr.value), operator, Box::new(rhs.value))})),
+        Err(e) => Err(e)
       }
     }
   }
-  return Ok((remainder, result));
 }
 
-fn output_statement(i: &str) -> ParseResult<ast::Statement> {
-  let (input, (output_name, _, _, _, expr, _, _)) 
-    = cut(tuple((name, multispace0, tag("<-"), multispace0, expression, multispace0, char(';'))))(i)?;
-  Ok((
-    input,
-    ast::Statement::Output(ast::OutputStatement { output: output_name.to_string(), expression: expr })
-  ))
+fn consume_modifiers(i: &str, expr: ast::Expression) -> ParseResult<ast::Expression> {
+  let mut r = (i, expr);
+  while true {
+    // TODO: cloning here isn't really OK .. 
+    let candidate = expression_modifier(r.0, r.1.clone());
+    if let Ok(result) = candidate {
+      r = result;
+    } else {
+      break;
+    }
+  }
+  Ok(r)
 }
 
-fn let_statement(i: &str) -> ParseResult<ast::Statement> {
-  let (input, (_, _, var_name, _, _, _, expr, _, _))
-    = tuple((tag("let"), multispace1, name, multispace0, char('='), multispace0, expression, multispace0, char(';')))(i)?;
-  Ok((
-    input,
-    ast::Statement::Let(ast::LetStatement { var_name: var_name.to_string(), expression: expr })
-  ))
-}
-
-fn block_statement(i: &str) -> ParseResult<ast::Statement> {
-  let (input, (_, _, (statements, _))) = tuple((
+fn block_expression(i: &str) -> ParseResult<ast::Expression> {
+  let (input, (_, _, mut expressions, _, unterm, _, _)) = tuple((
     char('{'),
     multispace0,
-    many_till(terminated(statement, multispace0), char('}'))
+    many0(terminated(terminated_expression, multispace0)),
+    multispace0,
+    opt(unterminated_expression),
+    multispace0,
+    char('}')
   ))(i)?;
-  Ok((input, ast::Statement::Block(statements)))
+  if let Some(expr) = unterm {
+    expressions.push(expr);
+  } else {
+    expressions.push(ast::Expression::unterminated(ast::ExpressionValue::Empty));
+  }
+  Ok((input, ast::Expression::terminated(ast::ExpressionValue::Block(expressions.drain(..).map(|a| a.value).collect()))))
 }
 
-fn statement(i: &str) -> ParseResult<ast::Statement> {
-  alt((block_statement, let_statement, output_statement))(i)
+fn expression(i: &str) -> ParseResult<ast::Expression> {
+  let r = alt((
+    block_expression, // { ...
+    let_expression, // let x = ...
+    output_expression, // x <- ...
+    if_expression, // if ...
+    int_literal, // 0-9...
+    string_literal,  // "...
+    tuple_expression, // (...
+    function, // known name set
+    state_reference // known name set
+  ))(i)?;
+  consume_modifiers(r.0, r.1)
+}
+
+fn terminated_expression(i: &str) -> ParseResult<ast::Expression> {
+  let (input, expr) = expression(i)?;
+  if expr.is_terminated {
+    Ok((input, expr))
+  } else {
+    let (input, _) = preceded(multispace0, char(';'))(input)?;
+    Ok((input, ast::Expression { value: expr.value, is_terminated: true }))
+  }
+}
+
+fn unterminated_expression(i: &str) -> ParseResult<ast::Expression> {
+  verify(expression, |result| !result.is_terminated)(i)
+}
+
+fn output_expression(i: &str) -> ParseResult<ast::Expression> {
+  let (input, (output_name, _, _, _, expr)) 
+    = tuple((name, multispace0, tag("<-"), multispace0, expression))(i)?;
+  Ok((
+    input,
+    ast::Expression::unterminated(ast::ExpressionValue::Output(ast::OutputExpression { output: output_name.to_string(), expression: Box::new(expr.into()) }))
+  ))
+}
+
+fn let_expression(i: &str) -> ParseResult<ast::Expression> {
+  let (input, (_, _, var_name, _, _, _, expr))
+    = tuple((tag("let"), multispace1, name, multispace0, char('='), multispace0, expression))(i)?;
+  Ok((
+    input,
+    ast::Expression::unterminated(ast::ExpressionValue::Let(ast::LetExpression { var_name: var_name.to_string(), expression: Box::new(expr.into()) }))
+  ))
+}
+
+fn if_expression(i: &str) -> ParseResult<ast::Expression> {
+  let (input, (_, _, test, _, if_true, else_clause)) = tuple((
+    tag("if"), multispace0, expression, multispace0, block_expression, 
+    opt(tuple((multispace0, tag("else"), multispace0, block_expression)))
+  ))(i)?;
+  if let Some((_, _, _, if_false)) = else_clause {
+    Ok((input, ast::Expression::terminated(ast::ExpressionValue::If(ast::IfExpression { test: Box::new(test.into()), if_true: Box::new(if_true.into()), if_false: Box::new(if_false.into()) }))))
+  } else {
+    Ok((input, ast::Expression::terminated(ast::ExpressionValue::If(ast::IfExpression { test: Box::new(test.into()), if_true: Box::new(if_true.into()), if_false: Box::new(ast::ExpressionValue::Empty) }))))
+  }
 }
 
 fn listener(i: &str) -> ParseResult<ast::Listener> {
-  let (input, (trigger, _, kind, _, (_, _, statement))) 
+  let (input, (trigger, _, kind, _, (_, _, expression))) 
     = tuple((name, char('.'), kind_token, multispace0, 
-        cut(tuple((char(':'), multispace0, statement)))))(i)?;
+        cut(tuple((char(':'), multispace0, terminated_expression)))))(i)?;
   Ok((
     input,
     ast::Listener {
       trigger: trigger.to_string(),
       kind,
-      statement,
+      implementation: expression.into(),
     }
   ))
 }
@@ -289,7 +355,7 @@ mod tests {
   fn parse_function() {
     assert_eq!(
       function("foo(bar)"), 
-      Ok(("", ast::Expression::Function("foo".to_string(), Box::new(ast::Expression::ReferenceToState("bar".to_string())))))
+      Ok(("", ast::Expression::unterminated(ast::ExpressionValue::FunctionCall("foo".to_string(), Box::new(ast::ExpressionValue::ReferenceToState("bar".to_string()))))))
     );
   }
 
@@ -345,9 +411,9 @@ mod tests {
       listener("foo.onChange: bar <- far;"),
       Ok((
         "",
-        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
-          ast::OutputStatement {
-            output: String::from("bar"), expression: ast::Expression::ReferenceToState(String:: from("far"))
+        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
+          ast::OutputExpression {
+            output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string()))
           }
         )}
       ))
@@ -360,10 +426,10 @@ mod tests {
       listener("foo.onChange: {\n  bar <- far;\n  }"),
       Ok((
         "",
-        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Block (
-          vec!(ast::Statement::Output ( ast::OutputStatement {
-            output: String::from("bar"), expression: ast::Expression::ReferenceToState(String:: from("far"))
-          }))
+        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Block(
+          vec!(ast::ExpressionValue::Output ( ast::OutputExpression {
+            output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string()))
+          }), ast::ExpressionValue::Empty)
         )}
       ))
     )
@@ -377,14 +443,14 @@ mod tests {
       Ok((
         "",
         vec!(
-          ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
-            ast::OutputStatement {
-              output: String::from("bar"), expression: ast::Expression::ReferenceToState(String:: from("far"))
+          ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
+            ast::OutputExpression {
+              output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string()))
             }
           )},
-          ast::Listener { trigger: String::from("far"), kind: ast::ListenerKind::OnWrite, statement: ast::Statement::Output (
-            ast::OutputStatement {
-              output: String::from("bax"), expression: ast::Expression::ReferenceToState(String:: from("fax"))
+          ast::Listener { trigger: String::from("far"), kind: ast::ListenerKind::OnWrite, implementation: ast::ExpressionValue::Output (
+            ast::OutputExpression {
+              output: String::from("bax"), expression: Box::new(ast::ExpressionValue::ReferenceToState("fax".to_string()))
             }
           )}
         )
@@ -404,10 +470,10 @@ mod tests {
     ast::Module {
       name: String::from("TestModule"),
       handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
-      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, statement: ast::Statement::Output (
-        ast::OutputStatement {
+      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
+        ast::OutputExpression {
           output: String::from("bar"),
-          expression: ast::Expression::Function("far".to_string(), Box::new(ast::Expression::ReferenceToState(String::from("la"))))
+          expression: Box::new(ast::ExpressionValue::FunctionCall("far".to_string(), Box::new(ast::ExpressionValue::ReferenceToState(String::from("la")))))
         }
       )}),
       submodules: Vec::new(),
