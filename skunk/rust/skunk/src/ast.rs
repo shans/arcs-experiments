@@ -58,21 +58,44 @@ pub struct CopyTo {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operator {
-  Equality
+  Equality,
+  LogicalOr,
+  LessThan,
+  GreaterThan
+}
+
+impl Operator {
+  pub fn precedence(&self) -> usize {
+    match self {
+      Operator::LogicalOr => 40,
+      Operator::LessThan | Operator::GreaterThan | Operator::Equality => 60,
+    }
+  }
+  pub fn is_logical(&self) -> bool {
+    match self {
+      Operator::LogicalOr => true,
+      _ => false,
+    }
+  }
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Expression {
   pub value: ExpressionValue,
-  pub is_terminated: bool
+  pub is_terminated: bool,
+  pub precedence: usize,
 }
 
 impl Expression {
   pub fn terminated(value: ExpressionValue) -> Self {
-    Expression { value, is_terminated: true }
+    Expression { value, is_terminated: true, precedence: 0 }
   }
   pub fn unterminated(value: ExpressionValue) -> Self {
-    Expression { value, is_terminated: false }
+    Expression { value, is_terminated: false, precedence: 0 }
+  }
+  pub fn binary_operator(lhs: Expression, op: Operator, rhs: Expression) -> Self {
+    let precedence = op.precedence();
+    Expression { value: ExpressionValue::BinaryOperator(Box::new(lhs.value), op, Box::new(rhs.value)), precedence, is_terminated: rhs.is_terminated }
   }
   pub fn empty() -> Self {
     Expression::unterminated(ExpressionValue::Empty)
@@ -99,6 +122,7 @@ pub enum ExpressionValue {
   FunctionCall(String, Box<ExpressionValue>),
   StringLiteral(String),
   IntLiteral(i64),
+  CharLiteral(u8),
   Tuple(Vec<ExpressionValue>),
   TupleLookup(Box<ExpressionValue>, i64),
   BinaryOperator(Box<ExpressionValue>, Operator, Box<ExpressionValue>)

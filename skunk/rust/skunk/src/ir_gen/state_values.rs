@@ -193,6 +193,9 @@ impl <'ctx> StateValue<'ctx> {
   pub fn new_bool(value: IntValue<'ctx>) -> Self {
     StateValue::new_prim_of_type(value.into(), vec!(TypePrimitive::Bool))
   }
+  pub fn new_char(value: IntValue<'ctx>) -> Self {
+    StateValue::new_prim_of_type(value.into(), vec!(TypePrimitive::Char))
+  }
   pub fn new_prim_of_type(value: BasicValueEnum<'ctx>, value_type: Vec<TypePrimitive>) -> Self {
     StateValue { value: ValueParts::SingleWordPrimitive(value), value_type }
   }
@@ -356,11 +359,36 @@ impl <'ctx> StateValue<'ctx> {
     Ok(())
   }
   pub fn equals(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    self.apply_int_predicate(cg, IntPredicate::EQ, other)
+  }
+
+  pub fn logical_or(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    let value_type = self.only_value_type()?;
+    let other_value_type = other.only_value_type()?;
+    if *value_type != TypePrimitive::Bool || *other_value_type != TypePrimitive::Bool {
+      Err(CodegenError::TypeMismatch("Can't use logical or on non-bools".to_string()))
+    } else {
+      let result = cg.builder.build_or(self.into_int_value()?, other.into_int_value()?, "logical-or");
+      Ok(StateValue::new_bool(result))
+    }
+  }
+
+  pub fn less_than(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    // TODO: This isn't right, need to take signedness into account
+    self.apply_int_predicate(cg, IntPredicate::SLT, other)
+  }
+
+  pub fn greater_than(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    // TODO: This isn't right, need to take signedness into account
+    self.apply_int_predicate(cg, IntPredicate::SGT, other)
+  }
+
+  fn apply_int_predicate(&self, cg: &CodegenState<'ctx>, predicate: IntPredicate, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
     // TODO: compound type equality
     let value_type = self.only_value_type()?;
     match value_type {
       TypePrimitive::Char | TypePrimitive::Int | TypePrimitive::Bool => {
-        let result = cg.builder.build_int_compare(IntPredicate::EQ, self.into_int_value()?, other.into_int_value()?, "eq");
+        let result = cg.builder.build_int_compare(predicate, self.into_int_value()?, other.into_int_value()?, "eq");
         Ok(StateValue::new_bool(result))
       }
       _ => todo!("Equality for non-primitive types")

@@ -211,6 +211,7 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
 
     ast::ExpressionValue::IntLiteral(_) => Ok(vec!(TypePrimitive::Int)),
     ast::ExpressionValue::StringLiteral(_) => Ok(vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char)))),
+    ast::ExpressionValue::CharLiteral(_) => Ok(vec!(TypePrimitive::Char)),
     ast::ExpressionValue::ArrayLookup(arr_exp, _) => {
       let arr_type = expression_type(cg, module, arr_exp)?;
       if arr_type.len() != 1 {
@@ -376,6 +377,9 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
     ast::ExpressionValue::IntLiteral(literal) => {
       Ok(StateValue::new_int(cg.uint_const(*literal as u64)))
     }
+    ast::ExpressionValue::CharLiteral(literal) => {
+      Ok(StateValue::new_char(cg.context.i8_type().const_int(*literal as u64, false)))
+    }
     ast::ExpressionValue::ArrayLookup(value, index) => {
       let arr_ptr = expression_codegen(cg, module, state_alloca, value)?;
       let idx = expression_codegen(cg, module, state_alloca, index)?;
@@ -387,7 +391,7 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
       let tuple_ptr = StateValue::new_tuple(cg, tuple_type)?;
       for (idx, entry) in entries.iter().enumerate() {
         let value = expression_codegen(cg, module, state_alloca, entry)?;
-        tuple_ptr.set_tuple_index(cg, idx as u32, value);
+        tuple_ptr.set_tuple_index(cg, idx as u32, value)?;
       }
       Ok(tuple_ptr)
     },
@@ -396,10 +400,34 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
       tuple.get_tuple_index(cg, *pos as u32)
     },
     ast::ExpressionValue::BinaryOperator(lhs, op, rhs) => {
-      let lhs_value = expression_codegen(cg, module, state_alloca, lhs)?;
-      let rhs_value = expression_codegen(cg, module, state_alloca, rhs)?;
-      match op {
-        ast::Operator::Equality => lhs_value.equals(cg, &rhs_value)
+      if op.is_logical() {
+        match op {
+          ast::Operator::LogicalOr => {
+            let lhs_value = expression_codegen(cg, module, state_alloca, lhs)?.into_int_value()?;
+            let current_block = cg.builder.get_insert_block().unwrap();
+            let lhs_false = append_new_block(cg, "lhs_false")?;
+            let end_of_test = append_new_block(cg, "end_of_test")?;
+            cg.builder.build_conditional_branch(lhs_value, end_of_test, lhs_false);
+            cg.builder.position_at_end(lhs_false);
+            let rhs_value = expression_codegen(cg, module, state_alloca, rhs)?.into_int_value()?;
+            cg.builder.build_unconditional_branch(end_of_test);
+
+            cg.builder.position_at_end(end_of_test);
+            let phi = cg.builder.build_phi(lhs_value.get_type(), "logical-or-result");
+            phi.add_incoming(&[(&lhs_value, current_block), (&rhs_value, lhs_false)]);
+            Ok(StateValue::new_bool(phi.as_basic_value().into_int_value()))
+          }
+          _ => todo!("Operator {:?} not yet implemented", op)
+        }
+      } else {
+        let lhs_value = expression_codegen(cg, module, state_alloca, lhs)?;
+        let rhs_value = expression_codegen(cg, module, state_alloca, rhs)?;
+        match op {
+          ast::Operator::Equality => lhs_value.equals(cg, &rhs_value),
+          ast::Operator::LessThan => lhs_value.less_than(cg, &rhs_value),
+          ast::Operator::GreaterThan => lhs_value.greater_than(cg, &rhs_value),
+          _ => todo!("Operator {:?} not yet implemented", op)
+        }
       }
     }
   }
@@ -558,7 +586,8 @@ mod tests {
     
     let (_, ast) = parser::parse(module).unwrap();
     if ast::modules(&ast).len() == 1 && ast::graphs(&ast).len() == 0 {
-      codegen(&context, &mut jit_info, &ast::modules(&ast)[0])?;
+      let modules = codegen(&context, &mut jit_info, &ast::modules(&ast)[0])?;
+      //modules[0].print_to_stderr();
     } else {
       let mut graph = graph_builder::make_graph(ast::graphs(&ast));
       graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
@@ -859,7 +888,7 @@ module SyntaxTest {
 
   input.onChange: {
     let offset = input.1;
-    if offset == size(input.0) {
+    if offset == size(input.0) || input.0[offset] < '0' || input.0[offset] > '9' {
       output <- input;
     }
     outputInt <- offset;
@@ -880,11 +909,15 @@ module SyntaxTest {
         let function: JitFunction<SyntaxTestFunc> = ee.get_function("SyntaxTest_update").unwrap();
         let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
+        dbg!(&state);
         assert_eq!(state.inp, state.out_upd);
         assert_eq!(state.bitfield, 0x6); // outputInt and output both updated
-        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 24), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
+        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("15 Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
         assert_eq!(state.bitfield, 0x4); // only outputInt updated
+        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
+        function.call(&mut state);
+        assert_eq!(state.bitfield, 0x6); // outputInt and output both updated
       }
     }) 
   }

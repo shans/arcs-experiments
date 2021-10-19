@@ -5,7 +5,7 @@ use super::ast;
 use nom::{
   IResult,
   branch::alt,
-  bytes::complete::{tag, is_a, take_until},
+  bytes::complete::{tag, is_a, take, take_until},
   character::complete::{alpha1, char, multispace0, multispace1, digit1}, 
   combinator::{verify, eof, cut, opt},
   error::{Error, ErrorKind, VerboseError, VerboseErrorKind},
@@ -107,18 +107,24 @@ fn int_literal(i: &str) -> ParseResult<ast::Expression> {
 }
 
 fn string_literal(i: &str) -> ParseResult<ast::Expression> {
-  let (input, (_, literal, _)) = tuple((char('"'), take_until("\""), char('"')))(i)?;
+  let (input, (_, literal, _)) = tuple((char('"'), cut(take_until("\"")), char('"')))(i)?;
   Ok((input, ast::Expression::unterminated(ast::ExpressionValue::StringLiteral(literal.to_string()))))
 }
 
+fn char_literal(i: &str) -> ParseResult<ast::Expression> {
+  let (input, literal) = delimited(char('\''), cut(take(1usize)), char('\''))(i)?;
+  Ok((input, ast::Expression::unterminated(ast::ExpressionValue::CharLiteral(literal.chars().nth(0).unwrap() as u8))))
+
+}
+
 fn tuple_expression(i: &str) -> ParseResult<ast::Expression> {
-  let (input, mut members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression), char(')'))(i)?;
+  let (input, mut members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression(0)), char(')'))(i)?;
   Ok((input, ast::Expression::unterminated(ast::ExpressionValue::Tuple(members.drain(..).map(|a| a.value).collect()))))
 }
 
 fn function(i: &str) -> ParseResult<ast::Expression> {
   // TODO: multiple arguments
-  let (input, (f_name, _, _, _, f_arg, _, _)) = tuple((name, multispace0, char('('), multispace0, expression, multispace0, char(')')))(i)?;
+  let (input, (f_name, _, _, _, f_arg, _, _)) = tuple((name, multispace0, char('('), multispace0, expression(0), multispace0, char(')')))(i)?;
   Ok((
     input,
     ast::Expression::unterminated(ast::ExpressionValue::FunctionCall(f_name.to_string(), Box::new(f_arg.into())))
@@ -136,33 +142,36 @@ fn function(i: &str) -> ParseResult<ast::Expression> {
 // so a terminated expression is a block, or a non-block expression with a ';'
 // a non-block expression is (everything except block), or a block with trailing components
 
-fn operator(i: &str) -> ParseResult<ast::Operator> {
-  token("==", ast::Operator::Equality)(i)
+fn operator(precedence: usize) -> impl Fn(&str) -> ParseResult<ast::Operator> {
+  move |i: &str| verify(alt((
+    token("==", ast::Operator::Equality),
+    token("||", ast::Operator::LogicalOr),
+    token("<", ast::Operator::LessThan),
+    token(">", ast::Operator::GreaterThan)
+  )), |op| op.precedence() > precedence)(i)
 }
 
-fn expression_modifier(i: &str, expr: ast::Expression) -> ParseResult<ast::Expression> {
-  let test = delimited(char('['), expression, char(']'))(i);
+fn expression_modifier(i: &str, expr: ast::Expression, precedence: usize) -> ParseResult<ast::Expression> {
+  let test = delimited(char('['), expression(0), char(']'))(i);
   if let Ok((input, value)) = test {
     Ok((input, ast::Expression::unterminated(ast::ExpressionValue::ArrayLookup(Box::new(expr.into()), Box::new(value.into())))))
   } else {
     let test = preceded(char('.'), int_literal)(i);
-    if let Ok((input, ast::Expression { value: ast::ExpressionValue::IntLiteral(literal), is_terminated: _ })) = test {
+    if let Ok((input, ast::Expression { value: ast::ExpressionValue::IntLiteral(literal), is_terminated: _, precedence: _ })) = test {
       Ok((input, ast::Expression::unterminated(ast::ExpressionValue::TupleLookup(Box::new(expr.into()), literal))))
     } else {
-      let test = tuple((preceded(multispace0, operator), preceded(multispace0, expression)))(i);
-      match test {
-        Ok((input, (operator, rhs))) => Ok((input, ast::Expression { is_terminated: rhs.is_terminated, value: ast::ExpressionValue::BinaryOperator(Box::new(expr.value), operator, Box::new(rhs.value))})),
-        Err(e) => Err(e)
-      }
+      let op_test = preceded(multispace0, operator(precedence))(i)?;
+      let exp_test = preceded(multispace0, expression(op_test.1.precedence()))(op_test.0)?;
+      Ok((exp_test.0, ast::Expression::binary_operator(expr, op_test.1, exp_test.1)))   
     }
   }
 }
 
-fn consume_modifiers(i: &str, expr: ast::Expression) -> ParseResult<ast::Expression> {
+fn consume_modifiers(i: &str, expr: ast::Expression, precedence: usize) -> ParseResult<ast::Expression> {
   let mut r = (i, expr);
   while true {
     // TODO: cloning here isn't really OK .. 
-    let candidate = expression_modifier(r.0, r.1.clone());
+    let candidate = expression_modifier(r.0, r.1.clone(), precedence);
     if let Ok(result) = candidate {
       r = result;
     } else {
@@ -190,38 +199,41 @@ fn block_expression(i: &str) -> ParseResult<ast::Expression> {
   Ok((input, ast::Expression::terminated(ast::ExpressionValue::Block(expressions.drain(..).map(|a| a.value).collect()))))
 }
 
-fn expression(i: &str) -> ParseResult<ast::Expression> {
-  let r = alt((
-    block_expression, // { ...
-    let_expression, // let x = ...
-    output_expression, // x <- ...
-    if_expression, // if ...
-    int_literal, // 0-9...
-    string_literal,  // "...
-    tuple_expression, // (...
-    function, // known name set
-    state_reference // known name set
-  ))(i)?;
-  consume_modifiers(r.0, r.1)
+fn expression(precedence: usize) -> impl Fn(&str) -> ParseResult<ast::Expression> {
+  move |i: &str| {
+    let r = alt((
+      block_expression, // { ...
+      let_expression, // let x = ...
+      output_expression, // x <- ...
+      if_expression, // if ...
+      int_literal, // 0-9...
+      string_literal,  // "...
+      char_literal, // '...
+      tuple_expression, // (...
+      function, // known name set
+      state_reference // known name set
+    ))(i)?;
+    consume_modifiers(r.0, r.1, precedence)
+  }
 }
 
 fn terminated_expression(i: &str) -> ParseResult<ast::Expression> {
-  let (input, expr) = expression(i)?;
+  let (input, expr) = expression(0)(i)?;
   if expr.is_terminated {
     Ok((input, expr))
   } else {
     let (input, _) = preceded(multispace0, char(';'))(input)?;
-    Ok((input, ast::Expression { value: expr.value, is_terminated: true }))
+    Ok((input, ast::Expression::terminated(expr.value)))
   }
 }
 
 fn unterminated_expression(i: &str) -> ParseResult<ast::Expression> {
-  verify(expression, |result| !result.is_terminated)(i)
+  verify(expression(0), |result| !result.is_terminated)(i)
 }
 
 fn output_expression(i: &str) -> ParseResult<ast::Expression> {
   let (input, (output_name, _, _, _, expr)) 
-    = tuple((name, multispace0, tag("<-"), multispace0, expression))(i)?;
+    = tuple((name, multispace0, tag("<-"), multispace0, expression(0)))(i)?;
   Ok((
     input,
     ast::Expression::unterminated(ast::ExpressionValue::Output(ast::OutputExpression { output: output_name.to_string(), expression: Box::new(expr.into()) }))
@@ -230,7 +242,7 @@ fn output_expression(i: &str) -> ParseResult<ast::Expression> {
 
 fn let_expression(i: &str) -> ParseResult<ast::Expression> {
   let (input, (_, _, var_name, _, _, _, expr))
-    = tuple((tag("let"), multispace1, name, multispace0, char('='), multispace0, expression))(i)?;
+    = tuple((tag("let"), multispace1, name, multispace0, char('='), multispace0, expression(0)))(i)?;
   Ok((
     input,
     ast::Expression::unterminated(ast::ExpressionValue::Let(ast::LetExpression { var_name: var_name.to_string(), expression: Box::new(expr.into()) }))
@@ -239,7 +251,7 @@ fn let_expression(i: &str) -> ParseResult<ast::Expression> {
 
 fn if_expression(i: &str) -> ParseResult<ast::Expression> {
   let (input, (_, _, test, _, if_true, else_clause)) = tuple((
-    tag("if"), multispace0, expression, multispace0, block_expression, 
+    tag("if"), multispace0, expression(0), multispace0, block_expression, 
     opt(tuple((multispace0, tag("else"), multispace0, block_expression)))
   ))(i)?;
   if let Some((_, _, _, if_false)) = else_clause {
@@ -530,5 +542,15 @@ mod tests {
         vec!(ast::TopLevel::Module(test_module_result()), ast::TopLevel::Graph(test_graph_result()))
       ))
     )
+  }
+  
+  #[test]
+  fn parse_expression_test() {
+    let test_str = "foo || bar == far > baz";
+    dbg!(expression(0)(test_str));
+    let test_str = "foo < boo || far > baz";
+    dbg!(expression(0)(test_str));
+    let test_str = "offset == size(input.0) || input.0[offset] < '0' || input.0[offset] > '9'";
+    dbg!(expression(0)(test_str));
   }
 }
