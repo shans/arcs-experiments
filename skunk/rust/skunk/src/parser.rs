@@ -189,7 +189,7 @@ fn block_expression(i: &str) -> ParseResult<ast::Expression> {
     multispace0,
     opt(unterminated_expression),
     multispace0,
-    char('}')
+    cut(char('}'))
   ))(i)?;
   if let Some(expr) = unterm {
     expressions.push(expr);
@@ -205,6 +205,7 @@ fn expression(precedence: usize) -> impl Fn(&str) -> ParseResult<ast::Expression
       block_expression, // { ...
       let_expression, // let x = ...
       output_expression, // x <- ...
+      output_return_expression, // x <!- ...
       if_expression, // if ...
       int_literal, // 0-9...
       string_literal,  // "...
@@ -236,7 +237,16 @@ fn output_expression(i: &str) -> ParseResult<ast::Expression> {
     = tuple((name, multispace0, tag("<-"), multispace0, expression(0)))(i)?;
   Ok((
     input,
-    ast::Expression::unterminated(ast::ExpressionValue::Output(ast::OutputExpression { output: output_name.to_string(), expression: Box::new(expr.into()) }))
+    ast::Expression::unterminated(ast::ExpressionValue::Output(ast::OutputExpression { output: output_name.to_string(), expression: Box::new(expr.into()), and_return: false }))
+  ))
+}
+
+fn output_return_expression(i: &str) -> ParseResult<ast::Expression> {
+  let (input, (output_name, _, _, _, expr)) 
+    = tuple((name, multispace0, tag("<!-"), multispace0, expression(0)))(i)?;
+  Ok((
+    input,
+    ast::Expression::unterminated(ast::ExpressionValue::Output(ast::OutputExpression { output: output_name.to_string(), expression: Box::new(expr.into()), and_return: true }))
   ))
 }
 
@@ -425,7 +435,7 @@ mod tests {
         "",
         ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
           ast::OutputExpression {
-            output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string()))
+            output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string())), and_return: false
           }
         )}
       ))
@@ -440,7 +450,7 @@ mod tests {
         "",
         ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Block(
           vec!(ast::ExpressionValue::Output ( ast::OutputExpression {
-            output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string()))
+            output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string())), and_return: false
           }), ast::ExpressionValue::Empty)
         )}
       ))
@@ -457,12 +467,12 @@ mod tests {
         vec!(
           ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
             ast::OutputExpression {
-              output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string()))
+              output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string())), and_return: false
             }
           )},
           ast::Listener { trigger: String::from("far"), kind: ast::ListenerKind::OnWrite, implementation: ast::ExpressionValue::Output (
             ast::OutputExpression {
-              output: String::from("bax"), expression: Box::new(ast::ExpressionValue::ReferenceToState("fax".to_string()))
+              output: String::from("bax"), expression: Box::new(ast::ExpressionValue::ReferenceToState("fax".to_string())), and_return: false
             }
           )}
         )
@@ -485,7 +495,8 @@ mod tests {
       listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
         ast::OutputExpression {
           output: String::from("bar"),
-          expression: Box::new(ast::ExpressionValue::FunctionCall("far".to_string(), Box::new(ast::ExpressionValue::ReferenceToState(String::from("la")))))
+          expression: Box::new(ast::ExpressionValue::FunctionCall("far".to_string(), Box::new(ast::ExpressionValue::ReferenceToState(String::from("la"))))),
+          and_return: false
         }
       )}),
       submodules: Vec::new(),

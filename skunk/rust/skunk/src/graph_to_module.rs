@@ -175,7 +175,8 @@ impl <'a> ModuleContext<'a> {
                              state: handle_info.handle.name.clone(),
                              submodule_index: handle_info.writes_to_submodule,
                              submodule_state: handle_info.submodule_handle.clone(),
-                           }))
+                           })),
+                           and_return: false
                          })
                        })
                   .collect()

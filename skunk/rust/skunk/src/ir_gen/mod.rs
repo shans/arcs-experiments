@@ -260,6 +260,9 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
         let update_ptr = cg.update_ptr_for_field(module, state_ptr.into_pointer_value(), &output_expression.output, UpdatePtrPurpose::WriteAndSet)?;
         return_value.store(cg, update_ptr)?;
       }
+      if output_expression.and_return {
+        cg.builder.build_return(None);
+      }
       Ok(return_value)
     }
     ast::ExpressionValue::Block(expressions) => {
@@ -529,7 +532,7 @@ mod tests {
                   ),
       listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
         ast::OutputExpression {
-          output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState(String::from("far")))
+          output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState(String::from("far"))), and_return: false
         }
       )}),
       submodules: Vec::new(),
@@ -542,7 +545,7 @@ mod tests {
       handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
       listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
         ast::OutputExpression {
-          output: String::from("foo"), expression: Box::new(ast::ExpressionValue::ReferenceToState(String::from("foo")))
+          output: String::from("foo"), expression: Box::new(ast::ExpressionValue::ReferenceToState(String::from("foo"))), and_return: false
         })
       }),
       submodules: Vec::new(),
@@ -884,40 +887,37 @@ CreateTuple -> ReadTuple;
 module SyntaxTest {
   input: reads (String, Int);
   output: writes (String, Int);
-  outputInt: writes Int;
+  result: writes Int;
+  error: writes Int;
 
   input.onChange: {
     let offset = input.1;
     if offset == size(input.0) || input.0[offset] < '0' || input.0[offset] > '9' {
-      output <- input;
+      error <!- 1;
     }
-    outputInt <- offset;
+    
+    result <- 3;
+
   }
 }
   ";
 
-/*
-
-*/
-
-  state_struct!(SyntaxTest, inp: *const (MemRegion, u64), out: *const(MemRegion, u64), outputInt: u64);
+  state_struct!(SyntaxTest, inp: *const (MemRegion, u64), out: *const(MemRegion, u64), result: u64, error: u64);
 
   #[test]
   fn jit_syntax_test_codegen_runs() -> CodegenStatus {
     ee_for_string(SYNTAX_TEST_STRING, |ee: ExecutionEngine| {
       unsafe {
         let function: JitFunction<SyntaxTestFunc> = ee.get_function("SyntaxTest_update").unwrap();
-        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
+        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
-        dbg!(&state);
-        assert_eq!(state.inp, state.out_upd);
-        assert_eq!(state.bitfield, 0x6); // outputInt and output both updated
-        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("15 Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
+        assert_eq!(state.bitfield, 0x8); // error updated
+        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("15 Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
-        assert_eq!(state.bitfield, 0x4); // only outputInt updated
-        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), outputInt: 0, outputInt_upd: 0, bitfield: 0x1 };
+        assert_eq!(state.bitfield, 0x4); // result updated
+        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
-        assert_eq!(state.bitfield, 0x6); // outputInt and output both updated
+        assert_eq!(state.bitfield, 0x8); // error updated
       }
     }) 
   }

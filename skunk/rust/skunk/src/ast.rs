@@ -138,6 +138,7 @@ impl From<Expression> for ExpressionValue {
 pub struct OutputExpression {
   pub output: String,
   pub expression: Box<ExpressionValue>,
+  pub and_return: bool,
 }
 
 #[derive(Debug, PartialEq, Clone)]
