@@ -50,7 +50,7 @@ fn llvm_type_for_primitive<'ctx>(cg: &CodegenState<'ctx>, primitive_type: &Vec<T
   }
 }
 
-impl Typeable for ast::Module {
+impl <'a> Typeable for ast::Module<'a> {
   fn ir_type<'ctx>(&self, cg: &CodegenState<'ctx>) -> AnyTypeEnum<'ctx> {
     let mut sub_types: Vec<BasicTypeEnum> = Vec::new();
     for handle in &self.handles {
@@ -65,7 +65,7 @@ impl Typeable for ast::Module {
   }
 }
 
-impl Nameable for ast::Module {
+impl <'a> Nameable for ast::Module<'a> {
   fn fn_name(&self) -> String {
     self.name.clone() + "_update"
   }
@@ -92,7 +92,7 @@ pub fn module_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module) -
   module_update_function(cg, module)
 }
 
-fn module_update_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module) -> CodegenStatus {
+fn module_update_function<'ctx, 'a>(cg: &CodegenState<'ctx>, module: &ast::Module<'a>) -> CodegenStatus {
   // Compute a trigger mask - we only need to trigger when a listener is installed on a handle
   // TODO: we don't actually use this..
   let mut trigger_mask: u64 = 0;
@@ -130,11 +130,11 @@ fn module_update_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module) -
     let write_ptr = cg.read_ptr_for_field(module, state_ptr, &handle.name)?;
     let update_ptr = cg.update_ptr_for_field(module, state_ptr, &handle.name, UpdatePtrPurpose::ReadAndClear)?;
     let value = update_ptr.load(cg, "value")?;
-    value.store(cg, write_ptr)?;
+    value.store(cg, &write_ptr)?;
     update_ptr.clear_update_pointer(cg)?;
 
     for listener in module.listeners.iter() {
-      if listener.trigger == handle.name {
+      if listener.trigger == *handle.name.fragment() {
         let function_name = (module, listener).fn_name();
         let function = cg.module.get_function(&function_name).ok_or(CodegenError::FunctionMissing)?;
         cg.builder.build_call(function, &[state_ptr.into()], "_");
@@ -151,7 +151,7 @@ fn module_update_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module) -
 }
 
 
-impl Nameable for (&ast::Module, &ast::Listener) {
+impl <'a> Nameable for (&ast::Module<'a>, &ast::Listener) {
   fn fn_name(&self) -> String {
     self.0.name.clone() + "__" + self.1.kind.to_string() + "__" + &self.1.trigger
   }
@@ -161,7 +161,7 @@ fn ir_listener_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module) -> AnyT
     AnyTypeEnum::FunctionType(cg.context.void_type().fn_type(&[module.ir_type(cg).into_struct_type().ptr_type(AddressSpace::Generic).into()], false))
 }
 
-impl Typeable for (&ast::Module, &ast::Listener) {
+impl <'a> Typeable for (&ast::Module<'a>, &ast::Listener) {
   fn ir_type<'ctx>(&self, cg: &CodegenState<'ctx>) -> AnyTypeEnum<'ctx> {
     ir_listener_type(cg, self.0)
   }
@@ -208,6 +208,8 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
     ast::ExpressionValue::If(if_expression) => todo!("Implement if expression typing"),
 
     ast::ExpressionValue::Empty => Ok(Vec::new()),
+    //TODO: This is wrong if while loops have non-none type.
+    ast::ExpressionValue::Break => Ok(Vec::new()),
 
     ast::ExpressionValue::IntLiteral(_) => Ok(vec!(TypePrimitive::Int)),
     ast::ExpressionValue::StringLiteral(_) => Ok(vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char)))),
@@ -234,7 +236,7 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
       if let Some(local) = cg.get_local(field) {
         Ok(local.value_type.clone())
       } else {
-        let h_type = module.type_for_field(field).ok_or(CodegenError::BadReadFieldName)?;
+        let h_type = module.type_for_field(field).ok_or(CodegenError::BadReadFieldName(field.clone()))?;
         Ok(type_primitive_for_type(&h_type))
       }
     }
@@ -243,9 +245,11 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
       Ok(vec!(TypePrimitive::PointerTo(tuple_contents)))
     }
     ast::ExpressionValue::TupleLookup(expr, pos) => {
-      todo!("tuplelookup typing");
+      let tuple_type = expression_type(cg, module, expr)?;
+      Ok(vec!(tuple_type[*pos as usize].clone()))
     }
     ast::ExpressionValue::BinaryOperator(lhs, op, rhs) => todo!("Implement binary operation typing"),
+    ast::ExpressionValue::While(while_expr) => todo!("Implement while typing"),
   }
 }
 
@@ -258,10 +262,12 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
       if output_expression.output.len() > 0 {
         let state_ptr = cg.builder.build_load(state_alloca, "state_ptr");
         let update_ptr = cg.update_ptr_for_field(module, state_ptr.into_pointer_value(), &output_expression.output, UpdatePtrPurpose::WriteAndSet)?;
-        return_value.store(cg, update_ptr)?;
+        return_value.store(cg, &update_ptr)?;
       }
       if output_expression.and_return {
         cg.builder.build_return(None);
+        let junk_block = append_new_block(cg, "junk_block")?;
+        cg.builder.position_at_end(junk_block);
       }
       Ok(return_value)
     }
@@ -274,7 +280,7 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
     }
     ast::ExpressionValue::Let(let_expression) => {
       let value = expression_codegen(cg, module, state_alloca, &let_expression.expression)?;
-      cg.add_local(&let_expression.var_name, value.clone());
+      cg.add_local(&let_expression.var_name, value.clone())?;
       Ok(value)
     }
 
@@ -306,11 +312,35 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
       }
     }
 
+    ast::ExpressionValue::While(while_expression) => {
+      let while_condition = flow_to_new_block(cg, "while_condition")?;
+      let test = expression_codegen(cg, module, state_alloca, while_expression.test.as_ref())?.into_int_value()?;
+      let while_body = append_new_block(cg, "while_body")?;
+      let after_while = append_new_block(cg, "after_while")?;
+      let cmp = cg.builder.build_int_compare(IntPredicate::NE, test, test.get_type().const_zero(), "while_true");
+      cg.builder.build_conditional_branch(cmp, while_body, after_while);
+      cg.builder.position_at_end(while_body);
+      cg.break_target.push(after_while);
+      expression_codegen(cg, module, state_alloca, while_expression.body.as_ref())?;
+      cg.break_target.pop();
+      cg.builder.build_unconditional_branch(while_condition);
+      cg.builder.position_at_end(after_while);
+      // TODO: work out whether while loops should have non-none return type
+      Ok(StateValue::new_none())
+    }
+
     ast::ExpressionValue::Empty => Ok(StateValue::new_none()),
+
+    ast::ExpressionValue::Break => {
+      cg.builder.build_unconditional_branch(*cg.break_target.last().ok_or(CodegenError::NakedBreak)?);
+      let junk_block = append_new_block(cg, "junk_block")?;
+      cg.builder.position_at_end(junk_block);
+      Ok(StateValue::new_suppress())
+    }
 
     ast::ExpressionValue::ReferenceToState(field) => {
       if let Some(local) = cg.get_local(field) {
-        Ok((*local).clone())
+        Ok(local)
       } else {
         let state_ptr = cg.builder.build_load(state_alloca, "state_ptr");
         let value_ptr = cg.read_ptr_for_field(module, state_ptr.into_pointer_value(), &field)?;
@@ -325,7 +355,7 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
       let submodule_info = &module.submodules[info.submodule_index];
       let to_update_ptr = cg.update_ptr_for_field(&submodule_info.module, submodule_state_ptr, &info.submodule_state, UpdatePtrPurpose::WriteAndSet)?;
       let value = from_value_ptr.load(cg, "value")?;
-      value.store(cg, to_update_ptr)?;
+      value.store(cg, &to_update_ptr)?;
 
       let invoke_loop_start = flow_to_new_block(cg, "invoke_loop_start")?;
 
@@ -366,6 +396,11 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
         "size" => {
           let value = expression_codegen(cg, module, state_alloca, expression)?;
           value.size(cg)
+        }
+        "dump" => {
+          let value = expression_codegen(cg, module, state_alloca, expression)?;
+          debug(cg, value)?;
+          Ok(StateValue::new_none())
         }
         _name => {
           panic!("Don't know function {}", name);
@@ -420,6 +455,21 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
             phi.add_incoming(&[(&lhs_value, current_block), (&rhs_value, lhs_false)]);
             Ok(StateValue::new_bool(phi.as_basic_value().into_int_value()))
           }
+          ast::Operator::LogicalAnd => {
+            let lhs_value = expression_codegen(cg, module, state_alloca, lhs)?.into_int_value()?;
+            let current_block = cg.builder.get_insert_block().unwrap();
+            let lhs_true = append_new_block(cg, "lhs_true")?;
+            let end_of_test = append_new_block(cg, "end_of_test")?;
+            cg.builder.build_conditional_branch(lhs_value, lhs_true, end_of_test);
+            cg.builder.position_at_end(lhs_true);
+            let rhs_value = expression_codegen(cg, module, state_alloca, rhs)?.into_int_value()?;
+            cg.builder.build_unconditional_branch(end_of_test);
+
+            cg.builder.position_at_end(end_of_test);
+            let phi = cg.builder.build_phi(lhs_value.get_type(), "logical-and-result");
+            phi.add_incoming(&[(&lhs_value, current_block), (&rhs_value, lhs_true)]);
+            Ok(StateValue::new_bool(phi.as_basic_value().into_int_value()))
+          }
           _ => todo!("Operator {:?} not yet implemented", op)
         }
       } else {
@@ -429,6 +479,11 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
           ast::Operator::Equality => lhs_value.equals(cg, &rhs_value),
           ast::Operator::LessThan => lhs_value.less_than(cg, &rhs_value),
           ast::Operator::GreaterThan => lhs_value.greater_than(cg, &rhs_value),
+          ast::Operator::LessThanOrEqual => lhs_value.less_than_or_equal(cg, &rhs_value),
+          ast::Operator::GreaterThanOrEqual => lhs_value.greater_than_or_equal(cg, &rhs_value),
+          ast::Operator::Add => lhs_value.add(cg, &rhs_value),
+          ast::Operator::Subtract => lhs_value.subtract(cg, &rhs_value),
+          ast::Operator::Multiply => lhs_value.multiply(cg, &rhs_value),
           _ => todo!("Operator {:?} not yet implemented", op)
         }
       }
@@ -458,9 +513,22 @@ fn get_malloc<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
   }).unwrap()
 }
 
-fn maybe_copy_back_to_module<'ctx>(
+fn debug<'ctx>(cg: &CodegenState<'ctx>, s: StateValue<'ctx>) -> CodegenStatus {
+  let printf = get_printf(cg);
+  s.debug(cg, printf);
+  Ok(())
+}
+
+fn get_printf<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
+  cg.module.get_function("printf").or_else(|| {
+    let function_type = cg.context.i32_type().fn_type(&[cg.context.i8_type().ptr_type(AddressSpace::Generic).into()], true);
+    Some(cg.module.add_function("printf", function_type, None))
+  }).unwrap()
+}
+
+fn maybe_copy_back_to_module<'ctx, 'a>(
   cg: &CodegenState<'ctx>, 
-  module: &ast::Module,
+  module: &ast::Module<'a>,
   state_ptr: PointerValue<'ctx>, 
   submodule_info: &ast::ModuleInfo, 
   submodule_state_ptr: PointerValue<'ctx>, 
@@ -478,14 +546,14 @@ fn maybe_copy_back_to_module<'ctx>(
 
   cg.builder.position_at_end(do_copy);
 
-  let src_name = &submodule_info.module.handles[index].name;
+  let src_name = submodule_info.module.handles[index].name.fragment();
   let src_ptr = cg.update_ptr_for_field(&submodule_info.module, submodule_state_ptr, src_name, UpdatePtrPurpose::ReadWithoutClearing)?;
 
-  let dest_name = &submodule_info.handle_map.get(src_name).unwrap();
+  let dest_name = &submodule_info.handle_map.get(&src_name.to_string()).unwrap();
   let dest_ptr = cg.update_ptr_for_field(module, state_ptr, dest_name, UpdatePtrPurpose::WriteAndSet)?;
 
   let value = src_ptr.load(cg, "value")?;
-  value.store(cg, dest_ptr)?;
+  value.store(cg, &dest_ptr)?;
 
   cg.builder.build_unconditional_branch(after_copy);
   cg.builder.position_at_end(after_copy);
@@ -523,12 +591,12 @@ mod tests {
 
   use std::ptr;
 
-  fn test_module() -> ast::Module {
+  fn test_module<'a>() -> ast::Module<'a> {
     ast::Module {
       name: String::from("TestModule"),
-      handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
-                    ast::Handle { name: String::from("far"), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
-                    ast::Handle { name: String::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
+      handles: vec!(ast::Handle { name: ast::Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
+                    ast::Handle { name: ast::Span::from("far"), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
+                    ast::Handle { name: ast::Span::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
                   ),
       listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
         ast::OutputExpression {
@@ -539,10 +607,10 @@ mod tests {
     }
   }
 
-  fn invalid_module() -> ast::Module {
+  fn invalid_module<'a>() -> ast::Module<'a> {
      ast::Module {
       name: String::from("InvalidModule"),
-      handles: vec!(ast::Handle { name: String::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
+      handles: vec!(ast::Handle { name: ast::Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
       listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
         ast::OutputExpression {
           output: String::from("foo"), expression: Box::new(ast::ExpressionValue::ReferenceToState(String::from("foo"))), and_return: false
@@ -590,11 +658,12 @@ mod tests {
     let (_, ast) = parser::parse(module).unwrap();
     if ast::modules(&ast).len() == 1 && ast::graphs(&ast).len() == 0 {
       let modules = codegen(&context, &mut jit_info, &ast::modules(&ast)[0])?;
-      //modules[0].print_to_stderr();
+      // modules[0].print_to_stderr();
     } else {
       let mut graph = graph_builder::make_graph(ast::graphs(&ast));
       graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
-      let main = graph_to_module::graph_to_module(&graph, &ast::modules(&ast), "Main").unwrap();
+      let modules = ast::modules(&ast);
+      let main = graph_to_module::graph_to_module(&graph, &modules, "Main").unwrap();
       codegen(&context, &mut jit_info, &main)?;
     }
     let ee = jit_info.execution_engine.unwrap();
@@ -896,8 +965,17 @@ module SyntaxTest {
       error <!- 1;
     }
     
-    result <- 3;
+    let result = 0;
+    while input.0[offset] >= '0' && input.0[offset] <= '9' {
+      result = result * 10 + input.0[offset] - '0';
+      offset = offset + 1;
+      if offset == size(input.0) {
+        break;
+      }
+    }
 
+    result <- result;
+    output <- (input.0, offset);
   }
 }
   ";
@@ -911,14 +989,89 @@ module SyntaxTest {
         let function: JitFunction<SyntaxTestFunc> = ee.get_function("SyntaxTest_update").unwrap();
         let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
+        dbg!(&state);
         assert_eq!(state.bitfield, 0x8); // error updated
         let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("15 Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
+        dbg!(&state);
         assert_eq!(state.bitfield, 0x4); // result updated
         let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
+        dbg!(&state);
         assert_eq!(state.bitfield, 0x8); // error updated
       }
     }) 
+  }
+
+
+  static TEMP_WHILE_TEST_STRING: &str = "
+module WhileTest {
+  string: reads (String, Int);
+  result: writes Int;
+
+  string.onChange: {
+    let x = 0;
+    let counter = 0;
+    while string.0[counter] >= '0' && string.0[counter] <= '9' {
+      x = x * 10 + string.0[counter] - '0';
+      counter = counter + 1;
+      if counter == string.1 {
+        break;
+      }
+    }
+
+    result <- x;
+  }
+}  
+  ";
+
+  state_struct!(TWhileTest, string: *const (MemRegion, u64), result: u64);
+
+  #[test]
+  fn jit_xxx_while_test_codegen_runs() -> CodegenStatus {
+    ee_for_string(TEMP_WHILE_TEST_STRING, |ee: ExecutionEngine| {
+      unsafe {
+        let function: JitFunction<TWhileTestFunc> = ee.get_function("WhileTest_update").unwrap();
+        let mut state = TWhileTestState { string: ptr::null(), string_upd: &(MemRegion::from_str("42360 "), 6), result: 0, result_upd: 0, bitfield: 0x1 };
+        function.call(&mut state);
+        dbg!(state);
+      }
+    })
+  }
+
+  static WHILE_TEST_STRING: &str = "
+module WhileTest {
+  len: reads Int;
+  string: reads String;
+  result: writes Int;
+
+  len.onChange: {
+    let x = 0;
+    let counter = 0;
+    while string[counter] >= '0' && string[counter] <= '9' {
+      x = x * 10 + string[counter] - '0';
+      counter = counter + 1;
+      if counter == len {
+        break;
+      }
+    }
+
+    result <- x;
+  }
+}  
+  ";
+
+  state_struct!(WhileTest, len: u64, string: MemRegion, result: u64);
+
+  #[test]
+  fn jit_while_test_codegen_runs() -> CodegenStatus {
+    ee_for_string(WHILE_TEST_STRING, |ee: ExecutionEngine| {
+      unsafe {
+        let function: JitFunction<WhileTestFunc> = ee.get_function("WhileTest_update").unwrap();
+        let mut state = WhileTestState { len: 0, len_upd: 5, string: MemRegion::from_str("42360 "), string_upd: MemRegion::empty(), result: 0, result_upd: 0, bitfield: 0x1 };
+        function.call(&mut state);
+        dbg!(state);
+      }
+    })
   }
 }

@@ -1,4 +1,9 @@
+extern crate nom_locate;
+
 use std::collections::hash_map::HashMap;
+use nom_locate::LocatedSpan;
+
+pub type Span<'a> = LocatedSpan<&'a str>;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Usage {
@@ -33,13 +38,13 @@ impl ListenerKind {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Handle {
-  pub name: String,
+pub struct Handle<'a> {
+  pub name: Span<'a>,
   pub usages: Vec<Usage>,
   pub h_type: Type,
 }
 
-impl Handle {
+impl <'a> Handle<'a> {
   pub fn is_input(&self) -> bool {
     self.usages.iter().any(|usage| *usage == Usage::Read)
   }
@@ -60,20 +65,31 @@ pub struct CopyTo {
 pub enum Operator {
   Equality,
   LogicalOr,
+  LogicalAnd,
   LessThan,
-  GreaterThan
+  LessThanOrEqual,
+  GreaterThan,
+  GreaterThanOrEqual,
+  Multiply,
+  Divide,
+  Add,
+  Subtract,
 }
 
 impl Operator {
   pub fn precedence(&self) -> usize {
     match self {
+      Operator::Multiply | Operator::Divide => 120,
+      Operator::Add | Operator::Subtract => 100,
       Operator::LogicalOr => 40,
-      Operator::LessThan | Operator::GreaterThan | Operator::Equality => 60,
+      Operator::LogicalAnd => 50,
+      Operator::LessThan | Operator::LessThanOrEqual | Operator::GreaterThanOrEqual | Operator::GreaterThan | Operator::Equality => 60,
     }
   }
   pub fn is_logical(&self) -> bool {
     match self {
       Operator::LogicalOr => true,
+      Operator::LogicalAnd => true,
       _ => false,
     }
   }
@@ -112,8 +128,10 @@ pub enum ExpressionValue {
   Block(Vec<ExpressionValue>),
   Let(LetExpression),
   If(IfExpression),
+  While(WhileExpression),
 
   Empty, // used to terminate Blocks with no return
+  Break,
 
   // expression-like
   ArrayLookup(Box<ExpressionValue>, Box<ExpressionValue>),
@@ -144,7 +162,8 @@ pub struct OutputExpression {
 #[derive(Debug, PartialEq, Clone)]
 pub struct LetExpression {
   pub var_name: String,
-  pub expression: Box<ExpressionValue>
+  pub expression: Box<ExpressionValue>,
+  pub is_update: bool
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -155,6 +174,12 @@ pub struct IfExpression {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct WhileExpression {
+  pub test: Box<ExpressionValue>,
+  pub body: Box<ExpressionValue>
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct Listener {
   pub trigger: String,
   pub kind: ListenerKind,
@@ -162,22 +187,22 @@ pub struct Listener {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct ModuleInfo {
-  pub module: Module,
+pub struct ModuleInfo<'a> {
+  pub module: Module<'a>,
   pub handle_map: HashMap<String, String>
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Module {
+pub struct Module<'a> {
   pub name: String,
-  pub handles: Vec<Handle>,
+  pub handles: Vec<Handle<'a>>,
   pub listeners: Vec<Listener>,
-  pub submodules: Vec<ModuleInfo>,
+  pub submodules: Vec<ModuleInfo<'a>>,
 }
 
-impl Module {
+impl <'a> Module<'a> {
   pub fn idx_for_field(&self, field: &str) -> Option<usize> {
-    self.handles.iter().position(|handle| handle.name == field)
+    self.handles.iter().position(|handle| *handle.name.fragment() == field)
   }
 
   pub fn idx_for_bitfield(&self) -> usize {
@@ -193,7 +218,7 @@ impl Module {
   }
 
   pub fn handle_for_field(&self, field: &str) -> Option<&Handle> {
-    self.handles.iter().find(|handle| handle.name == field)
+    self.handles.iter().find(|handle| *handle.name.fragment() == field)
   }
 
   pub fn type_for_field(&self, field: &str) -> Option<Type> {
@@ -207,12 +232,12 @@ pub struct Graph {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum TopLevel {
-  Module(Module),
+pub enum TopLevel<'a> {
+  Module(Module<'a>),
   Graph(Graph),
 }
 
-pub fn modules<'a>(ast: &'a Vec<TopLevel>) -> Vec<&'a Module> {
+pub fn modules<'a>(ast: &'a Vec<TopLevel>) -> Vec<&'a Module<'a>> {
   ast.iter().filter_map(|top_level| {
     match top_level {
       TopLevel::Module(m) => Some(m),

@@ -41,7 +41,8 @@ fn main() {
   graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
   println!("\n\nThe resolved graph is: {:?}", graph);
 
-  let main = graph_to_module::graph_to_module(&graph, &ast::modules(&ast), "Main").unwrap();
+  let modules = ast::modules(&ast);
+  let main = graph_to_module::graph_to_module(&graph, &modules, "Main").unwrap();
   println!("\n\nThe constructed main module is {:?}", main);
 
   /*

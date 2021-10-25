@@ -3,20 +3,20 @@ use std::collections::hash_map::HashMap;
 use super::*;
 
 #[derive(Debug)]
-pub enum GraphToModuleError {
+pub enum GraphToModuleError<'a> {
   NameNotInModuleList(String),
-  NameNotInHandleList(ast::Module, String),
+  NameNotInHandleList(ast::Module<'a>, String),
   MultipleModulesForConnection(String)
 }
 
 #[derive(Debug)]
 pub struct ModuleInfo<'a> {
   pub index: usize,
-  pub module: &'a ast::Module
+  pub module: &'a ast::Module<'a>
 }
 
 impl <'a> ModuleInfo<'a> {
-  fn new(graph: &'a graph::Graph, modules: &'a Vec<&ast::Module>, index: usize) -> Result<ModuleInfo<'a>, GraphToModuleError> {
+  fn new(graph: &'a graph::Graph, modules: &'a Vec<&ast::Module>, index: usize) -> Result<ModuleInfo<'a>, GraphToModuleError<'a>> {
     let module_name = &graph.modules[index];
     let module = graph_builder::find_module_by_name(modules, module_name).ok_or_else(|| GraphToModuleError::NameNotInModuleList(module_name.clone()))?;
     let result = ModuleInfo { index, module };
@@ -32,21 +32,20 @@ pub struct HandleMappingInfo {
 
 // Information about a new handle that will exist on the constructed module.
 #[derive(Debug)]
-pub struct HandleInfo {
-  pub handle: ast::Handle,
+pub struct HandleInfo<'a> {
+  pub handle: ast::Handle<'a>,
   pub writes_to_submodule: usize,
   pub mapped_for_submodules: Vec<HandleMappingInfo>,
   pub submodule_handle: String
 }
 
-pub fn graph_to_module(graph: &graph::Graph, modules: &Vec<&ast::Module>, name: &str) -> Result<ast::Module, GraphToModuleError> {
+pub fn graph_to_module<'a>(graph: &'a graph::Graph, modules: &'a Vec<&ast::Module<'a>>, name: &str) -> Result<ast::Module<'a>, GraphToModuleError<'a>> {
   let module_context = ModuleContext::new(graph, modules)?;
   let mut handle_infos = module_context.generate_handles()?;
-  println!("{:?}", handle_infos);
-  let mut submodules: Vec<ast::ModuleInfo> = module_context.submodules().drain(..).map(|module| ast::ModuleInfo { module, handle_map: HashMap::new() }).collect();
+  let mut submodules: Vec<ast::ModuleInfo<'a>> = module_context.submodules().drain(..).map(|module| ast::ModuleInfo { module, handle_map: HashMap::new() }).collect();
   for handle_info in &handle_infos {
     for idx in &handle_info.mapped_for_submodules {
-      submodules[idx.submodule_idx].handle_map.insert(idx.submodule_handle.clone(), handle_info.handle.name.clone());
+      submodules[idx.submodule_idx].handle_map.insert(idx.submodule_handle.clone(), handle_info.handle.name.fragment().to_string());
     }
   }
   let listeners = module_context.generate_listeners(&handle_infos);
@@ -56,19 +55,19 @@ pub fn graph_to_module(graph: &graph::Graph, modules: &Vec<&ast::Module>, name: 
 
 pub struct ModuleContext<'a> {
   pub graph: &'a graph::Graph,
-  pub modules: &'a Vec<&'a ast::Module>,
+  pub modules: &'a Vec<&'a ast::Module<'a>>,
   pub module_infos: Vec<ModuleInfo<'a>>
 }
 
 impl <'a> ModuleContext<'a> {
-  fn new(graph: &'a graph::Graph, modules: &'a Vec<&ast::Module>) -> Result<ModuleContext<'a>, GraphToModuleError> {
+  fn new(graph: &'a graph::Graph, modules: &'a Vec<&ast::Module>) -> Result<ModuleContext<'a>, GraphToModuleError<'a>> {
     let module_infos: Result<Vec<ModuleInfo>, GraphToModuleError> = (0..graph.modules.len()).map(|idx| ModuleInfo::new(graph, modules, idx)).collect();
     Ok(ModuleContext { graph, modules, module_infos: module_infos? })
   }
 
   // Generate handles required on the outer module, and capture associated information (connection & submodule that the handle feeds into)
   // so that we can also generate listeners.
-  fn generate_handles(&self) -> Result<Vec<HandleInfo>, GraphToModuleError> {
+  fn generate_handles(&self) -> Result<Vec<HandleInfo<'a>>, GraphToModuleError<'a>> {
     let mut result = Vec::new();
 
     // Any submodule connections that aren't in the graph need to be added to the top-level module. These form the interface of the outer module.
@@ -123,7 +122,7 @@ impl <'a> ModuleContext<'a> {
       if !candidate_found {
         panic!("Handle has no readers, can't cope");
       }
-      let new_handle = ast::Handle { name: handle.name.clone(), h_type: handle.h_type.clone(), usages: vec!(ast::Usage::Read, ast::Usage::Write) };
+      let new_handle = ast::Handle { name: ast::Span::new(&handle.name), h_type: handle.h_type.clone(), usages: vec!(ast::Usage::Read, ast::Usage::Write) };
       result.push(HandleInfo { handle: new_handle, writes_to_submodule, mapped_for_submodules, submodule_handle: submodule_handle.clone() });
       // TODO: it's probably an error if there are no readers?
     
@@ -132,11 +131,11 @@ impl <'a> ModuleContext<'a> {
     Ok(result)
   }
 
-  fn find_module_by_name(&self, name: &str) -> Option<&ast::Module> {
+  fn find_module_by_name(&self, name: &str) -> Option<&ast::Module<'a>> {
     graph_builder::find_module_by_name(self.modules, name)
   }
 
-  fn free_connections(&self) -> Vec<(&ModuleInfo, &String)> {
+  fn free_connections(&self) -> Vec<(&ModuleInfo<'a>, String)> {
     let mut result = Vec::new();
 
     for idx in 0..self.graph.modules.len() {
@@ -147,7 +146,7 @@ impl <'a> ModuleContext<'a> {
     result
   }
 
-  fn free_connections_for_module(&self, module_info: &ModuleInfo<'a>) -> Vec<&String> {
+  fn free_connections_for_module(&self, module_info: &ModuleInfo<'a>) -> Vec<String> {
     // "connected connections" are all the connections which the graph indicates are connected (i.e. there's an arrow from the module to them).
     // We are relying on the lack of blind connections - i.e. we're assuming that if there's an arrow between a module M and a connection C,
     // then C will also have an arrow to a handle H  -   M -> C -> H or H -> C -> M.
@@ -158,7 +157,7 @@ impl <'a> ModuleContext<'a> {
           _ => panic!("Shouldn't be possible to have non-connection endpoints here")
         }
       }).collect();
-    module_info.module.handles.iter().map(|handle| &handle.name)
+    module_info.module.handles.iter().map(|handle| (*handle.name.fragment()).to_string())
                               .filter(|this_name| !connected_connections.iter().any(|handle_name| handle_name == this_name))
                               .collect()
   }
@@ -167,12 +166,12 @@ impl <'a> ModuleContext<'a> {
     // all handles with read permissions need listeners
     handle_infos.iter().filter(|handle_info| handle_info.handle.is_input())
                        .map(|handle_info| ast::Listener {
-                         trigger: handle_info.handle.name.clone(),
+                         trigger: handle_info.handle.name.fragment().to_string(),
                          kind: ast::ListenerKind::OnWrite,
                          implementation: ast::ExpressionValue::Output (ast::OutputExpression {
                            output: "".to_string(), // TODO: this should be the field(s) that get(s) copied back; but in practice that's inferred from the submodule
                            expression: Box::new(ast::ExpressionValue::CopyToSubModule(ast::CopyTo {
-                             state: handle_info.handle.name.clone(),
+                             state: handle_info.handle.name.fragment().to_string(),
                              submodule_index: handle_info.writes_to_submodule,
                              submodule_state: handle_info.submodule_handle.clone(),
                            })),
@@ -182,7 +181,7 @@ impl <'a> ModuleContext<'a> {
                   .collect()
   }
 
-  fn submodules(&self) -> Vec<ast::Module> {
+  fn submodules(&self) -> Vec<ast::Module<'a>> {
     // clone modules so the final data structure doesn't refer into the provided module list.
     self.module_infos.iter().map(|info| info.module.clone()).collect()
   }

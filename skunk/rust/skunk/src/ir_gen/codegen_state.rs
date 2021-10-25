@@ -1,3 +1,4 @@
+use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
@@ -11,7 +12,7 @@ use super::state_values::*;
 #[derive(Debug, PartialEq)]
 pub enum CodegenError {
   BadListenerTrigger,
-  BadReadFieldName,
+  BadReadFieldName(String),
   BadUpdateFieldName,
   InvalidStructPointer(String),
   InvalidIndex,
@@ -20,6 +21,7 @@ pub enum CodegenError {
   NotInABlock,
   InvalidFunctionArgument(String),
   TypeMismatch(String),
+  NakedBreak,
 }
 
 pub type CodegenStatus = Result<(), CodegenError>;
@@ -30,7 +32,8 @@ pub struct CodegenState<'ctx> {
   pub module: Module<'ctx>,
   pub builder: Builder<'ctx>,
   pub function_pass_manager: PassManager<FunctionValue<'ctx>>,
-  pub locals: HashMap<String, StateValue<'ctx>>
+  pub locals: HashMap<String, StatePointer<'ctx>>,
+  pub break_target: Vec<BasicBlock<'ctx>>
 }
 
 impl <'ctx> CodegenState<'ctx> {
@@ -43,7 +46,7 @@ impl <'ctx> CodegenState<'ctx> {
     let pass_manager_builder = PassManagerBuilder::create();
     let function_pass_manager = PassManager::create(&module);
     pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-    CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new() }
+    CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new() }
   }
 
   
@@ -51,12 +54,25 @@ impl <'ctx> CodegenState<'ctx> {
     self.context.i64_type().const_int(value, false)
   }
 
-  pub fn add_local(&mut self, name: &str, value: StateValue<'ctx>) {
-    self.locals.insert(name.to_string(), value);
+  pub fn add_local(&mut self, name: &str, value: StateValue<'ctx>) -> CodegenStatus {
+    if let Some(ptr) = self.locals.get(&name.to_string()) {
+      value.store(self, ptr)
+    } else {
+      let alloca = self.builder.build_alloca(value.llvm_type(), &("alloca_".to_string() + name));
+      let ptr = StatePointer::new_from_type_primitive(alloca, value.value_type.clone());
+      value.store(self, &ptr)?;
+
+      self.locals.insert(name.to_string(), ptr);
+      Ok(())
+    }
   }
 
-  pub fn get_local(&self, name: &str) -> Option<&StateValue<'ctx>> {
-    self.locals.get(name)
+  pub fn get_local(&self, name: &str) -> Option<StateValue<'ctx>> {
+    if let Some(ptr) = self.locals.get(&name.to_string()) {
+      Some(ptr.load(self, name).ok()?)
+    } else {
+      None
+    }
   }
 }
 
@@ -89,7 +105,7 @@ pub mod tests {
       let pass_manager_builder = PassManagerBuilder::create();
       let function_pass_manager = PassManager::create(&module);
       pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-      (CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new() }, execution_engine)
+      (CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new() }, execution_engine)
     }
   } 
 
@@ -118,7 +134,7 @@ pub mod tests {
       let pass_manager_builder = PassManagerBuilder::create();
       let function_pass_manager = PassManager::create(&module);
       pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-      CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new() }
+      CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new() }
     }
   }
 }

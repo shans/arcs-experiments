@@ -1,7 +1,7 @@
 use inkwell::{AddressSpace, IntPredicate};
 use inkwell::basic_block::BasicBlock;
 use inkwell::types::{StructType, BasicTypeEnum, BasicType};
-use inkwell::values::{BasicValueEnum, IntValue, PointerValue, PhiValue};
+use inkwell::values::{BasicValueEnum, IntValue, PointerValue, PhiValue, FunctionValue};
 
 use super::codegen_state::*;
 use super::ast;
@@ -175,6 +175,7 @@ impl <'ctx> StatePointer<'ctx> {
 #[derive(Debug, Clone)]
 pub enum ValueParts<'ctx> {
   None,
+  Suppress, // used to indicate a known terminated code-flow
   SingleWordPrimitive(BasicValueEnum<'ctx>),
   DynamicMemRegion(PointerValue<'ctx>, IntValue<'ctx>),
   StaticMemRegion(PointerValue<'ctx>)
@@ -219,6 +220,9 @@ impl <'ctx> StateValue<'ctx> {
   pub fn new_none() -> Self {
     StateValue { value: ValueParts::None, value_type: Vec::new() }
   }
+  pub fn new_suppress() -> Self {
+    StateValue { value: ValueParts::Suppress, value_type: Vec::new() }
+  }
 
   pub fn into_int_value(&self) -> CodegenResult<IntValue<'ctx>> {
     if let ValueParts::SingleWordPrimitive(v) = self.value {
@@ -239,11 +243,19 @@ impl <'ctx> StateValue<'ctx> {
     match self.value {
       ValueParts::SingleWordPrimitive(value) => value.get_type(),
       ValueParts::DynamicMemRegion(ptr, _) | ValueParts::StaticMemRegion(ptr) => ptr.get_type().into(),
-      ValueParts::None => panic!("dunno!"),
+      ValueParts::None | ValueParts::Suppress => panic!("dunno!"),
     }
   }
   pub fn is_none(&self) -> bool {
     if let ValueParts::None = self.value {
+      true
+    } else {
+      false
+    }
+  }
+
+  pub fn is_suppress(&self) -> bool {
+    if let ValueParts::Suppress = self.value {
       true
     } else {
       false
@@ -267,7 +279,29 @@ impl <'ctx> StateValue<'ctx> {
     
   }
 
-  pub fn store(&self, cg: &CodegenState<'ctx>, ptr: StatePointer<'ctx>) -> CodegenStatus {
+  pub fn debug(&self,cg: &CodegenState<'ctx>, printf: FunctionValue<'ctx>) -> CodegenStatus{
+    match self.value {
+      ValueParts::SingleWordPrimitive(v) => {
+        let value_type = self.only_value_type()?;
+        match value_type {
+          TypePrimitive::Int => {
+            let fmt = cg.builder.build_global_string_ptr("[Int %ld]\n", "fmt").as_pointer_value();
+            cg.builder.build_call(printf, &[fmt.into(), v], "_");
+            Ok(())
+          }
+          TypePrimitive::Bool => {
+            let fmt = cg.builder.build_global_string_ptr("[Bool %d]\n", "fmt").as_pointer_value();
+            cg.builder.build_call(printf, &[fmt.into(), v], "_");
+            Ok(())
+          }
+          _ => todo!("Implement debug for {:?}", value_type)
+        }
+      }
+      _ => todo!("Implement debug for {:?}", self.value)
+    }
+  }
+
+  pub fn store(&self, cg: &CodegenState<'ctx>, ptr: &StatePointer<'ctx>) -> CodegenStatus {
     // TODO: more complex type comparison?
     if !(ptr.pointer_type == self.value_type) {
       return Err(CodegenError::TypeMismatch("Attempt to store value into mismatched pointer".to_string()));
@@ -302,7 +336,8 @@ impl <'ctx> StateValue<'ctx> {
           Err(CodegenError::TypeMismatch("Attempt to store static-size region into non-region pointer".to_string()))
         }
       }
-      ValueParts::None => Ok(())
+      ValueParts::None => Ok(()),
+      ValueParts::Suppress => panic!("Attempting to store in known-terminated code flow"),
     }
   }
   pub fn size(&self, cg: &CodegenState<'ctx>) -> CodegenResult<Self> {
@@ -315,7 +350,8 @@ impl <'ctx> StateValue<'ctx> {
         Ok(StateValue::new_int(size))
       }
       ValueParts::StaticMemRegion(_data) => Ok(StateValue::new_int(cg.uint_const(type_size(&self.value_type)))),
-      ValueParts::None => Err(CodegenError::InvalidFunctionArgument("Can't call size() on None result".to_string()))
+      ValueParts::None => Err(CodegenError::InvalidFunctionArgument("Can't call size() on None result".to_string())),
+      ValueParts::Suppress => panic!("Attempting to size a known-terminated code flow"),
     }
   }
   pub fn array_lookup(&self, cg: &CodegenState<'ctx>, index: StateValue<'ctx>) -> CodegenResult<Self> {
@@ -343,7 +379,7 @@ impl <'ctx> StateValue<'ctx> {
   pub fn set_tuple_index(&self, cg: &CodegenState<'ctx>, index: u32, value: StateValue<'ctx>) -> CodegenStatus {
     // TODO: we should probably check if this type matches the expression type.
     let typed_ptr = self.tuple_index_ptr(cg, index)?;
-    value.store(cg, typed_ptr)
+    value.store(cg, &typed_ptr)
   }
   pub fn get_tuple_index(&self, cg: &CodegenState<'ctx>, index: u32) -> CodegenResult<StateValue<'ctx>> {
     let typed_ptr = self.tuple_index_ptr(cg, index)?;
@@ -378,9 +414,19 @@ impl <'ctx> StateValue<'ctx> {
     self.apply_int_predicate(cg, IntPredicate::SLT, other)
   }
 
+  pub fn less_than_or_equal(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    // TODO: This isn't right, need to take signedness into account
+    self.apply_int_predicate(cg, IntPredicate::SLE, other)
+  }
+
   pub fn greater_than(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
     // TODO: This isn't right, need to take signedness into account
     self.apply_int_predicate(cg, IntPredicate::SGT, other)
+  }
+
+  pub fn greater_than_or_equal(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    // TODO: This isn't right, need to take signedness into account
+    self.apply_int_predicate(cg, IntPredicate::SGE, other)
   }
 
   fn apply_int_predicate(&self, cg: &CodegenState<'ctx>, predicate: IntPredicate, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
@@ -394,6 +440,31 @@ impl <'ctx> StateValue<'ctx> {
       _ => todo!("Equality for non-primitive types")
     }
   }
+
+  pub fn multiply(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    let lhs = self.into_int_value()?;
+    let rhs = other.into_int_value()?;
+    Ok(StateValue::new_int(cg.builder.build_int_mul(lhs, rhs, "multiply")))
+  }
+
+  pub fn add(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    let mut lhs = self.into_int_value()?;
+    let mut rhs = other.into_int_value()?;
+    let lhs_bitsize = self.llvm_type().into_int_type().get_bit_width();
+    let rhs_bitsize = other.llvm_type().into_int_type().get_bit_width();
+    if lhs_bitsize > rhs_bitsize {
+      rhs = cg.builder.build_int_s_extend(rhs, self.llvm_type().into_int_type(), "sext_rhs");
+    } else if rhs_bitsize > lhs_bitsize {
+      lhs = cg.builder.build_int_s_extend(lhs, other.llvm_type().into_int_type(), "sext_lhs");
+    }
+    Ok(StateValue::new_int(cg.builder.build_int_add(lhs, rhs, "add")))
+  }
+
+  pub fn subtract(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    let lhs = self.into_int_value()?;
+    let rhs = other.into_int_value()?;
+    Ok(StateValue::new_int(cg.builder.build_int_sub(lhs, rhs, "subtract")))
+  }
 }
 
 pub enum UpdatePtrPurpose {
@@ -404,8 +475,8 @@ pub enum UpdatePtrPurpose {
 
 impl <'ctx> CodegenState<'ctx> {
   pub fn read_ptr_for_field(&self, module: &ast::Module, state: PointerValue<'ctx>, name: &str) -> CodegenResult<StatePointer<'ctx>> {
-    let idx = module.idx_for_field(name).ok_or(CodegenError::BadReadFieldName)?;
-    let h_type = module.type_for_field(name).ok_or(CodegenError::BadReadFieldName)?;
+    let idx = module.idx_for_field(name).ok_or(CodegenError::BadReadFieldName(name.to_string()))?;
+    let h_type = module.type_for_field(name).ok_or(CodegenError::BadReadFieldName(name.to_string()))?;
     let struct_idx = (2 * idx).try_into().or(Err(CodegenError::InvalidIndex))?;
     let ptr = self.builder.build_struct_gep(state, struct_idx, &("read_ptr_to".to_string() + name)).or(Err(CodegenError::InvalidStructPointer("read_ptr_for_field given bad state pointer".to_string())))?;
     Ok(StatePointer::new(ptr, h_type))
@@ -413,7 +484,7 @@ impl <'ctx> CodegenState<'ctx> {
 
   pub fn update_ptr_for_field(&self, module: &ast::Module, state: PointerValue<'ctx>, name: &str, purpose: UpdatePtrPurpose) -> CodegenResult<StatePointer<'ctx>> {
     let idx = module.idx_for_field(name).ok_or(CodegenError::BadUpdateFieldName)?;
-    let h_type = module.type_for_field(name).ok_or(CodegenError::BadReadFieldName)?;
+    let h_type = module.type_for_field(name).ok_or(CodegenError::BadReadFieldName(name.to_string()))?;
     let struct_idx = (2 * idx + 1).try_into().or(Err(CodegenError::InvalidIndex))?;
 
     let bitfield_ptr = self.module_bitfield_ptr(module, state)?;
