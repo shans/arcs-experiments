@@ -39,6 +39,7 @@ impl ListenerKind {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Handle<'a> {
+  pub position: Span<'a>,
   pub name: Span<'a>,
   pub usages: Vec<Usage>,
   pub h_type: Type,

@@ -122,7 +122,8 @@ impl <'a> ModuleContext<'a> {
       if !candidate_found {
         panic!("Handle has no readers, can't cope");
       }
-      let new_handle = ast::Handle { name: ast::Span::new(&handle.name), h_type: handle.h_type.clone(), usages: vec!(ast::Usage::Read, ast::Usage::Write) };
+      // TODO: What's the right place to position these synthetic handles?
+      let new_handle = ast::Handle { position: ast::Span::new(""), name: ast::Span::new(&handle.name), h_type: handle.h_type.clone(), usages: vec!(ast::Usage::Read, ast::Usage::Write) };
       result.push(HandleInfo { handle: new_handle, writes_to_submodule, mapped_for_submodules, submodule_handle: submodule_handle.clone() });
       // TODO: it's probably an error if there are no readers?
     

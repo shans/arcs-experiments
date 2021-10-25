@@ -79,11 +79,13 @@ fn handle_type(i: Span) -> ParseResult<ast::Type> {
 }
 
 fn handle(i: Span) -> ParseResult<ast::Handle> {
-  let (input, (h_name, _, _, _, h_usages, _, h_type, _, _))
+  let (i, position) = position(i)?;
+  let (i, (h_name, _, _, _, h_usages, _, h_type, _, _))
     = tuple((name, multispace0, char(':'), multispace0, usages, multispace1, handle_type, multispace0, char(';')))(i)?;
   Ok((
-    input, 
+    i, 
     ast::Handle {
+      position,
       name: h_name,
       usages: h_usages.clone(),
       h_type
@@ -416,15 +418,15 @@ mod tests {
   fn parse_handle() {
     assert_eq!(
       handle(Span::new("foo: reads writes Int;")).unwrap().1,
-      ast::Handle { name: Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
+      ast::Handle { position: Span::from(""), name: Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
     );
     assert_eq!(
       handle(Span::new("bar: writes String;")).unwrap().1,
-      ast::Handle { name: Span::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::String }
+      ast::Handle { position: Span::from(""), name: Span::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::String }
     );
     assert_eq!(
       handle(Span::new("foo: reads writes Int; bar: writes String;")).unwrap().1,
-      ast::Handle { name: Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
+      ast::Handle { position: Span::from(""), name: Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
     )
   }
 
@@ -434,8 +436,8 @@ mod tests {
       handles(Span::new("foo: reads writes Int;
                          bar: writes String;")).unwrap().1,
       vec!(
-        ast::Handle { name: Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
-        ast::Handle { name: unsafe { Span::new_from_raw_offset(48, 2, "bar", ()) }, usages: vec!(ast::Usage::Write), h_type: ast::Type::String },
+        ast::Handle { position: Span::from(""), name: Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
+        ast::Handle { position: unsafe { Span::new_from_raw_offset(48, 2, "", ()) }, name: unsafe { Span::new_from_raw_offset(48, 2, "bar", ()) }, usages: vec!(ast::Usage::Write), h_type: ast::Type::String },
       )
     )
   }
@@ -500,7 +502,7 @@ mod tests {
   fn test_module_result<'a>() -> ast::Module<'a> {
     ast::Module {
       name: String::from("TestModule"),
-      handles: vec!(ast::Handle { name: unsafe { Span::new_from_raw_offset(22, 2, "foo", ()) }, usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
+      handles: vec!(ast::Handle { position: unsafe { Span::new_from_raw_offset(22, 2, "", ()) }, name: unsafe { Span::new_from_raw_offset(22, 2, "foo", ()) }, usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
       listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
         ast::OutputExpression {
           output: String::from("bar"),

@@ -594,9 +594,9 @@ mod tests {
   fn test_module<'a>() -> ast::Module<'a> {
     ast::Module {
       name: String::from("TestModule"),
-      handles: vec!(ast::Handle { name: ast::Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
-                    ast::Handle { name: ast::Span::from("far"), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
-                    ast::Handle { name: ast::Span::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
+      handles: vec!(ast::Handle { position: ast::Span::from(""), name: ast::Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
+                    ast::Handle { position: ast::Span::from(""), name: ast::Span::from("far"), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
+                    ast::Handle { position: ast::Span::from(""), name: ast::Span::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
                   ),
       listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
         ast::OutputExpression {
@@ -610,7 +610,7 @@ mod tests {
   fn invalid_module<'a>() -> ast::Module<'a> {
      ast::Module {
       name: String::from("InvalidModule"),
-      handles: vec!(ast::Handle { name: ast::Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
+      handles: vec!(ast::Handle { position: ast::Span::from(""), name: ast::Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
       listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
         ast::OutputExpression {
           output: String::from("foo"), expression: Box::new(ast::ExpressionValue::ReferenceToState(String::from("foo"))), and_return: false
