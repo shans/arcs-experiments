@@ -71,7 +71,7 @@ impl <'a> Nameable for ast::Module<'a> {
   }
 }
 
-pub fn codegen<'ctx>(context: &'ctx Context, constructor: &mut dyn CodegenStateConstructor<'ctx>, module: &ast::Module) -> CodegenResult<Vec<Module<'ctx>>> {
+pub fn codegen<'ctx>(context: &'ctx Context, constructor: &mut dyn CodegenStateConstructor<'ctx>, module: &'ctx ast::Module<'ctx>) -> CodegenResult<Vec<Module<'ctx>>> {
   let mut result = Vec::new();
   let mut cg = constructor.construct(context, &module.name);
   module_codegen(&mut cg, module)?;
@@ -84,7 +84,7 @@ pub fn codegen<'ctx>(context: &'ctx Context, constructor: &mut dyn CodegenStateC
   Ok(result)
 }
 
-pub fn module_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module) -> CodegenStatus {
+pub fn module_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Module<'ctx>) -> CodegenStatus {
   for listener in module.listeners.iter() {
     listener_codegen(cg, module, listener)?;
   }
@@ -167,7 +167,7 @@ impl <'a> Typeable for (&ast::Module<'a>, &ast::Listener<'a>) {
   }
 }
 
-fn listener_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, listener: &ast::Listener) -> CodegenStatus {
+fn listener_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module<'ctx>, listener: &'ctx ast::Listener<'ctx>) -> CodegenStatus {
   let function_type = (module, listener).ir_type(cg).into_function_type();
   let listener_name = (module, listener).fn_name();
   let function = cg.module.add_function(&listener_name, function_type, None);
@@ -182,7 +182,7 @@ fn state_alloca_for_module_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast:
   state_alloca
 }
 
-fn listener_body_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, implementation: &ast::ExpressionValue, function: FunctionValue<'ctx>) -> CodegenStatus {
+fn listener_body_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module<'ctx>, implementation: &'ctx ast::ExpressionValue<'ctx>, function: FunctionValue<'ctx>) -> CodegenStatus {
   let entry_block = cg.context.append_basic_block(function, "entry");
   cg.builder.position_at_end(entry_block);
   let state_alloca = state_alloca_for_module_function(cg, module, function);
@@ -246,15 +246,25 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
     }
     ast::ExpressionValueEnum::TupleLookup(expr, pos) => {
       let tuple_type = expression_type(cg, module, expr.as_ref())?;
-      Ok(vec!(tuple_type[*pos as usize].clone()))
+      if tuple_type.len() == 1 {
+        if let TypePrimitive::PointerTo(tuple_type) = &tuple_type[0] {
+          Ok(vec!(tuple_type[*pos as usize].clone()))
+        } else {
+          Err(CodegenError::TypeMismatch("non-pointer tuple field of size 1".to_string()))
+        }
+      } else {
+        todo!("Implement type lookup by field # for inline tuples")
+      }
     }
     ast::ExpressionValueEnum::BinaryOperator(lhs, op, rhs) => todo!("Implement binary operation typing"),
     ast::ExpressionValueEnum::While(while_expr) => todo!("Implement while typing"),
   }
 }
 
-fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, state_alloca: PointerValue<'ctx>, expression: &ast::ExpressionValue) -> CodegenResult<StateValue<'ctx>> {
-  match &expression.info {
+fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module<'ctx>, state_alloca: PointerValue<'ctx>, expression: &'ctx ast::ExpressionValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+  let old_considering = cg.considering;
+  cg.considering = Some(expression);
+  let result = match &expression.info {
     ast::ExpressionValueEnum::Output(output_expression) => {
       let return_value = expression_codegen(cg, module, state_alloca, &output_expression.expression)?;
       // expression.output == "" is a workaround for an effectful subexpression (e.g. a CopyToSubModule). This is an 'orrible 'ack and should
@@ -488,7 +498,9 @@ fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, s
         }
       }
     }
-  }
+  };
+  cg.considering = old_considering;
+  result
 }
 
 fn invoke_submodule<'ctx>(cg: &CodegenState<'ctx>, submodule: &ast::Module, submodule_state_ptr: PointerValue<'ctx>) -> CodegenStatus {
@@ -581,6 +593,7 @@ mod tests {
 
   use inkwell::execution_engine::{JitFunction, ExecutionEngine};
 
+  use super::super::ast::Expr;
   use super::super::parser;
   use super::super::graph_builder;
   use super::super::graph_to_module;
@@ -632,8 +645,8 @@ mod tests {
   fn module_codegen_succeeds() {
     let context = Context::create();
     let (target_triple, target_machine) = target_triple_and_machine();
-    let mut cs = CodegenState::new(&context, &target_machine, &target_triple, "TestModule");
     let module = test_module();
+    let mut cs = CodegenState::new(&context, &target_machine, &target_triple, "TestModule");
     assert_eq!(module_codegen(&mut cs, &module), Ok(()))
   }
 
@@ -641,29 +654,53 @@ mod tests {
   fn invalid_module_codegen_fails() {
     let context = Context::create();
     let (target_triple, target_machine) = target_triple_and_machine();
-    let mut cs = CodegenState::new(&context, &target_machine, &target_triple, "InvalidModule");
     let module = invalid_module();
+    let mut cs = CodegenState::new(&context, &target_machine, &target_triple, "InvalidModule");
     assert_eq!(module_codegen(&mut cs, &module), Err(CodegenError::BadListenerTrigger))
+  }
+
+  #[test]
+  fn expression_types() -> CodegenStatus {
+    let (_, ast) = parser::parse("
+module ExpressionTypes {
+  i_tuple: reads (String, Int);
+  offset: reads Int;
+}
+    ").unwrap();
+    let modules = ast::modules(&ast);
+    let module = modules[0];
+
+    let context = Context::create();
+    let (target_triple, target_machine) = target_triple_and_machine();
+    let cg = CodegenState::new(&context, &target_machine, &target_triple, "InvalidModule");
+    let t = expression_type(&cg, module, &Expr::tuple(0, 0, vec!(Expr::sref(0, 0, "i_tuple").tuple_ref(0, 0, 0), Expr::sref(0, 0, "offset"))).build())?;
+    let u = expression_type(&cg, module, &Expr::sref(0, 0, "i_tuple").build())?;
+    let v = expression_type(&cg, module, &Expr::sref(0, 0, "i_tuple").tuple_ref(0, 0, 0).build())?;
+    dbg!(t, u, v);
+    Ok(())
   }
 
   fn ee_for_string<F>(module: &str, func: F) -> CodegenStatus
       where F: FnOnce(ExecutionEngine) -> () {
     let context = Context::create();
-    let mut jit_info = JitInfo::new();
-    
     let (_, ast) = parser::parse(module).unwrap();
+    
     if ast::modules(&ast).len() == 1 && ast::graphs(&ast).len() == 0 {
+      let mut jit_info = JitInfo::new();
       let modules = codegen(&context, &mut jit_info, &ast::modules(&ast)[0])?;
+      let ee = jit_info.execution_engine.unwrap();
+      func(ee);
       // modules[0].print_to_stderr();
     } else {
       let mut graph = graph_builder::make_graph(ast::graphs(&ast));
       graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
       let modules = ast::modules(&ast);
       let main = graph_to_module::graph_to_module(&graph, &modules, "Main").unwrap();
+      let mut jit_info = JitInfo::new();
       codegen(&context, &mut jit_info, &main)?;
+      let ee = jit_info.execution_engine.unwrap();
+      func(ee);
     }
-    let ee = jit_info.execution_engine.unwrap();
-    func(ee);
     Ok(())
   }
 
@@ -711,11 +748,11 @@ mod tests {
   #[test]
   fn jit_module_codegen_runs() -> CodegenStatus {
     let context = Context::create();
+    let module = test_module();
     let mut jit_info = JitInfo::new();
     let mut cg = jit_info.construct(&context, "TestModule");
     let ee = jit_info.execution_engine.unwrap();
 
-    let module = test_module();
     module_codegen(&mut cg, &module)?;
     unsafe {
       let function: JitFunction<TestModuleFunc> = ee.get_function("TestModule_update").unwrap();
@@ -985,54 +1022,17 @@ module SyntaxTest {
         let function: JitFunction<SyntaxTestFunc> = ee.get_function("SyntaxTest_update").unwrap();
         let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
-        dbg!(&state);
         assert_eq!(state.bitfield, 0x8); // error updated
         let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("15 Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
-        dbg!(&state);
-        assert_eq!(state.bitfield, 0x4); // result updated
+        assert_eq!(state.bitfield, 0x6); // result, output updated
+        assert_eq!((*state.out_upd).1, 2); // offset advanced by 2
+        assert_eq!(state.result_upd, 15); // result parsed from string
         let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
         function.call(&mut state);
-        dbg!(&state);
         assert_eq!(state.bitfield, 0x8); // error updated
       }
     }) 
-  }
-
-
-  static TEMP_WHILE_TEST_STRING: &str = "
-module WhileTest {
-  string: reads (String, Int);
-  result: writes Int;
-
-  string.onChange: {
-    let x = 0;
-    let counter = 0;
-    while string.0[counter] >= '0' && string.0[counter] <= '9' {
-      x = x * 10 + string.0[counter] - '0';
-      counter = counter + 1;
-      if counter == string.1 {
-        break;
-      }
-    }
-
-    result <- x;
-  }
-}  
-  ";
-
-  state_struct!(TWhileTest, string: *const (MemRegion, u64), result: u64);
-
-  #[test]
-  fn jit_xxx_while_test_codegen_runs() -> CodegenStatus {
-    ee_for_string(TEMP_WHILE_TEST_STRING, |ee: ExecutionEngine| {
-      unsafe {
-        let function: JitFunction<TWhileTestFunc> = ee.get_function("WhileTest_update").unwrap();
-        let mut state = TWhileTestState { string: ptr::null(), string_upd: &(MemRegion::from_str("42360 "), 6), result: 0, result_upd: 0, bitfield: 0x1 };
-        function.call(&mut state);
-        dbg!(state);
-      }
-    })
   }
 
   static WHILE_TEST_STRING: &str = "

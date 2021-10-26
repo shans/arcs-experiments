@@ -60,7 +60,7 @@ pub struct ModuleContext<'a> {
 }
 
 impl <'a> ModuleContext<'a> {
-  fn new(graph: &'a graph::Graph, modules: &'a Vec<&ast::Module>) -> Result<ModuleContext<'a>, GraphToModuleError<'a>> {
+  fn new(graph: &'a graph::Graph, modules: &'a Vec<&ast::Module<'a>>) -> Result<ModuleContext<'a>, GraphToModuleError<'a>> {
     let module_infos: Result<Vec<ModuleInfo>, GraphToModuleError> = (0..graph.modules.len()).map(|idx| ModuleInfo::new(graph, modules, idx)).collect();
     Ok(ModuleContext { graph, modules, module_infos: module_infos? })
   }
@@ -163,7 +163,7 @@ impl <'a> ModuleContext<'a> {
                               .collect()
   }
 
-  fn generate_listeners(&self, handle_infos: &Vec<HandleInfo>) -> Vec<ast::Listener<'a>> {
+  fn generate_listeners(&self, handle_infos: &Vec<HandleInfo<'a>>) -> Vec<ast::Listener<'a>> {
     // all handles with read permissions need listeners
     // TODO: Appropriate span locations for generated code.
     handle_infos.iter().filter(|handle_info| handle_info.handle.is_input())

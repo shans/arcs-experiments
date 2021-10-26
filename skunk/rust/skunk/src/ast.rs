@@ -216,6 +216,9 @@ impl <'a> Expr<'a> {
       ExpressionValueEnum::TupleLookup(Box::new(lhs), idx)
     }), offset, line }
   }
+  pub fn tuple(offset: usize, line: u32, mut exprs: Vec<Expr<'a>>) -> Self {
+    Expr { expr: Box::new(move |offset, line| ExpressionValueEnum::Tuple(exprs.drain(..).map(|e| e.mk(offset, line)).collect())), offset, line }
+  }
   pub fn array_index(self, offset: usize, line: u32, expr: Expr<'a>) -> Self {
     let offset = offset + self.offset;
     let line = line + self.line;
@@ -356,7 +359,7 @@ pub enum TopLevel<'a> {
   Graph(Graph),
 }
 
-pub fn modules<'a>(ast: &'a Vec<TopLevel>) -> Vec<&'a Module<'a>> {
+pub fn modules<'a>(ast: &'a Vec<TopLevel<'a>>) -> Vec<&'a Module<'a>> {
   ast.iter().filter_map(|top_level| {
     match top_level {
       TopLevel::Module(m) => Some(m),

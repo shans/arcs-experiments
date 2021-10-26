@@ -8,6 +8,7 @@ use inkwell::targets::{TargetMachine, TargetTriple};
 
 use std::collections::HashMap;
 use super::state_values::*;
+use super::ast::ExpressionValue;
 
 #[derive(Debug, PartialEq)]
 pub enum CodegenError {
@@ -33,7 +34,8 @@ pub struct CodegenState<'ctx> {
   pub builder: Builder<'ctx>,
   pub function_pass_manager: PassManager<FunctionValue<'ctx>>,
   pub locals: HashMap<String, StatePointer<'ctx>>,
-  pub break_target: Vec<BasicBlock<'ctx>>
+  pub break_target: Vec<BasicBlock<'ctx>>,
+  pub considering: Option<&'ctx ExpressionValue<'ctx>>,
 }
 
 impl <'ctx> CodegenState<'ctx> {
@@ -46,7 +48,7 @@ impl <'ctx> CodegenState<'ctx> {
     let pass_manager_builder = PassManagerBuilder::create();
     let function_pass_manager = PassManager::create(&module);
     pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-    CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new() }
+    CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None }
   }
 
   
@@ -105,7 +107,7 @@ pub mod tests {
       let pass_manager_builder = PassManagerBuilder::create();
       let function_pass_manager = PassManager::create(&module);
       pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-      (CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new() }, execution_engine)
+      (CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None }, execution_engine)
     }
   } 
 
@@ -134,7 +136,7 @@ pub mod tests {
       let pass_manager_builder = PassManagerBuilder::create();
       let function_pass_manager = PassManager::create(&module);
       pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-      CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new() }
+      CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None }
     }
   }
 }

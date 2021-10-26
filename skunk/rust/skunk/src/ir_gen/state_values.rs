@@ -60,7 +60,7 @@ pub enum TypePrimitive {
 
 // PointerKind describes operationally how a pointer should be treated. This includes an understanding of how to move values
 // between pointers, and how to inflate from a pointer to a StateValue
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum PointerKind {
   // Pointers 1 word or smaller; the actual size is given by the LLVM pointer type used
   SingleWordPrimitive,
@@ -85,6 +85,7 @@ pub fn type_size(type_vec: &Vec<TypePrimitive>) -> u64 {
   size
 }
 
+#[derive(Debug)]
 pub struct StatePointer<'ctx> {
   pub pointer_kind: PointerKind,
   pub pointer: PointerValue<'ctx>,

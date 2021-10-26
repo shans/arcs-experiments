@@ -377,7 +377,7 @@ fn top_levels(i: Span) -> ParseResult<Vec<ast::TopLevel>> {
   separated_list0(multispace1, top_level)(i)
 }
 
-pub fn parse(i: &str) -> ParseResult<Vec<ast::TopLevel>> {
+pub fn parse<'a>(i: &'a str) -> ParseResult<Vec<ast::TopLevel<'a>>> {
   let (input, (result, _)) = tuple((
     delimited(multispace0, top_levels, multispace0),
     eof
