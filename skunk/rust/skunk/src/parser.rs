@@ -105,37 +105,40 @@ fn kind_token(i: Span) -> ParseResult<ast::ListenerKind> {
 }
 
 fn state_reference(i: Span) -> ParseResult<ast::Expression> {
-  name(i).map(|(rest, state_elt)| (rest, ast::Expression::unterminated(ast::ExpressionValue::ReferenceToState(state_elt.to_string()))))
+  let (i, position) = position(i)?;
+  name(i).map(|(rest, state_elt)| (rest, ast::Expression::state_reference(position, state_elt.fragment())))
 }
 
 fn int_literal(i: Span) -> ParseResult<ast::Expression> {
-  let (input, const_int) = digit1(i)?;
-  Ok((input, ast::Expression::unterminated(ast::ExpressionValue::IntLiteral(const_int.parse::<i64>().unwrap()))))
+  let (i, position) = position(i)?;
+  let (i, const_int) = digit1(i)?;
+  Ok((i, ast::Expression::int_literal(position, const_int.parse::<i64>().unwrap())))
 }
 
 fn string_literal(i: Span) -> ParseResult<ast::Expression> {
-  let (input, (_, literal, _)) = tuple((char('"'), cut(take_until("\"")), char('"')))(i)?;
-  Ok((input, ast::Expression::unterminated(ast::ExpressionValue::StringLiteral(literal.to_string()))))
+  let (i, position) = position(i)?;
+  let (i, (_, literal, _)) = tuple((char('"'), cut(take_until("\"")), char('"')))(i)?;
+  Ok((i, ast::Expression::string_literal(position, literal.fragment())))
 }
 
 fn char_literal(i: Span) -> ParseResult<ast::Expression> {
-  let (input, literal) = delimited(char('\''), cut(take(1usize)), char('\''))(i)?;
-  Ok((input, ast::Expression::unterminated(ast::ExpressionValue::CharLiteral(literal.chars().nth(0).unwrap() as u8))))
+  let (i, position) = position(i)?;
+  let (i, literal) = delimited(char('\''), cut(take(1usize)), char('\''))(i)?;
+  Ok((i, ast::Expression::char_literal(position, literal.chars().nth(0).unwrap() as u8)))
 
 }
 
 fn tuple_expression(i: Span) -> ParseResult<ast::Expression> {
-  let (input, mut members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression(0)), char(')'))(i)?;
-  Ok((input, ast::Expression::unterminated(ast::ExpressionValue::Tuple(members.drain(..).map(|a| a.value).collect()))))
+  let (i, position) = position(i)?;
+  let (i, mut members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression(0)), char(')'))(i)?;
+  Ok((i, ast::Expression::tuple(position, members)))
 }
 
 fn function(i: Span) -> ParseResult<ast::Expression> {
   // TODO: multiple arguments
-  let (input, (f_name, _, _, _, f_arg, _, _)) = tuple((name, multispace0, char('('), multispace0, expression(0), multispace0, char(')')))(i)?;
-  Ok((
-    input,
-    ast::Expression::unterminated(ast::ExpressionValue::FunctionCall(f_name.to_string(), Box::new(f_arg.into())))
-  ))
+  let (i, position) = position(i)?;
+  let (i, (f_name, _, _, _, f_arg, _, _)) = tuple((name, multispace0, char('('), multispace0, expression(0), multispace0, char(')')))(i)?;
+  Ok((i, ast::Expression::function_call(position, f_name.fragment(), f_arg)))
 }
 
 // Expression cases
@@ -165,25 +168,31 @@ fn operator(precedence: usize) -> impl Fn(Span) -> ParseResult<ast::Operator> {
   )), |op| op.precedence() > precedence)(i)
 }
 
-fn expression_modifier(i: Span, expr: ast::Expression, precedence: usize) -> ParseResult<ast::Expression> {
+fn expression_modifier<'a>(i: Span<'a>, expr: ast::Expression<'a>, precedence: usize) -> ParseResult<'a, ast::Expression<'a>> {
   let test = delimited(char('['), expression(0), char(']'))(i);
-  if let Ok((input, value)) = test {
-    Ok((input, ast::Expression::unterminated(ast::ExpressionValue::ArrayLookup(Box::new(expr.into()), Box::new(value.into())))))
+  let (i, _) = multispace0(i)?;
+  let (i, position) = position(i)?;
+  if let Ok((i, value)) = test {
+    Ok((i, ast::Expression::array_lookup(position, expr, value)))
   } else {
     let test = preceded(char('.'), int_literal)(i);
-    if let Ok((input, ast::Expression { value: ast::ExpressionValue::IntLiteral(literal), is_terminated: _, precedence: _ })) = test {
-      Ok((input, ast::Expression::unterminated(ast::ExpressionValue::TupleLookup(Box::new(expr.into()), literal))))
+    if let Ok((i, ast::Expression {
+      value: ast::ExpressionValue {
+        info: ast::ExpressionValueEnum::IntLiteral(literal),
+        position: _
+      }, is_terminated: _, precedence: _ })) = test {
+      Ok((i, ast::Expression::tuple_lookup(position, expr, literal)))
     } else {
-      let op_test = preceded(multispace0, operator(precedence))(i)?;
+      let op_test = operator(precedence)(i)?;
       let exp_test = preceded(multispace0, expression(op_test.1.precedence()))(op_test.0)?;
-      Ok((exp_test.0, ast::Expression::binary_operator(expr, op_test.1, exp_test.1)))   
+      Ok((exp_test.0, ast::Expression::binary_operator(position, expr, op_test.1, exp_test.1)))   
     }
   }
 }
 
-fn consume_modifiers(i: Span, expr: ast::Expression, precedence: usize) -> ParseResult<ast::Expression> {
+fn consume_modifiers<'a>(i: Span<'a>, expr: ast::Expression<'a>, precedence: usize) -> ParseResult<'a, ast::Expression<'a>> {
   let mut r = (i, expr);
-  while true {
+  loop {
     // TODO: cloning here isn't really OK .. 
     let candidate = expression_modifier(r.0, r.1.clone(), precedence);
     if let Ok(result) = candidate {
@@ -196,7 +205,8 @@ fn consume_modifiers(i: Span, expr: ast::Expression, precedence: usize) -> Parse
 }
 
 fn block_expression(i: Span) -> ParseResult<ast::Expression> {
-  let (input, (_, _, mut expressions, _, unterm, _, _)) = tuple((
+  let(i, block_position) = position(i)?;
+  let (i, (_, _, mut expressions, _, unterm, _, _)) = tuple((
     char('{'),
     multispace0,
     many0(terminated(terminated_expression, multispace0)),
@@ -208,9 +218,10 @@ fn block_expression(i: Span) -> ParseResult<ast::Expression> {
   if let Some(expr) = unterm {
     expressions.push(expr);
   } else {
-    expressions.push(ast::Expression::unterminated(ast::ExpressionValue::Empty));
+    let (i, position) = position(i)?;
+    expressions.push(ast::Expression::empty(position));
   }
-  Ok((input, ast::Expression::terminated(ast::ExpressionValue::Block(expressions.drain(..).map(|a| a.value).collect()))))
+  Ok((i, ast::Expression::block(block_position, expressions)))
 }
 
 fn expression(precedence: usize) -> impl Fn(Span) -> ParseResult<ast::Expression> {
@@ -223,7 +234,7 @@ fn expression(precedence: usize) -> impl Fn(Span) -> ParseResult<ast::Expression
       output_return_expression, // x <!- ...
       if_expression, // if ...
       while_expression, // while ...
-      token("break", ast::Expression::unterminated(ast::ExpressionValue::Break)), // break
+      break_expression, // break
       int_literal, // 0-9...
       string_literal,  // "...
       char_literal, // '...
@@ -233,6 +244,12 @@ fn expression(precedence: usize) -> impl Fn(Span) -> ParseResult<ast::Expression
     ))(i)?;
     consume_modifiers(r.0, r.1, precedence)
   }
+}
+
+fn break_expression(i: Span) -> ParseResult<ast::Expression> {
+  let (i, position) = position(i)?;
+  let (i, _) = tag("break")(i)?;
+  Ok((i, ast::Expression::break_expression(position)))
 }
 
 fn terminated_expression(i: Span) -> ParseResult<ast::Expression> {
@@ -250,58 +267,52 @@ fn unterminated_expression(i: Span) -> ParseResult<ast::Expression> {
 }
 
 fn output_expression(i: Span) -> ParseResult<ast::Expression> {
-  let (input, (output_name, _, _, _, expr)) 
+  let (i, position) = position(i)?;
+  let (i, (output_name, _, _, _, expr)) 
     = tuple((name, multispace0, tag("<-"), multispace0, expression(0)))(i)?;
-  Ok((
-    input,
-    ast::Expression::unterminated(ast::ExpressionValue::Output(ast::OutputExpression { output: output_name.to_string(), expression: Box::new(expr.into()), and_return: false }))
-  ))
+  Ok((i, ast::Expression::output(position, output_name.fragment(), expr, false)))
 }
 
 fn output_return_expression(i: Span) -> ParseResult<ast::Expression> {
-  let (input, (output_name, _, _, _, expr)) 
+  let (i, position) = position(i)?;
+  let (i, (output_name, _, _, _, expr)) 
     = tuple((name, multispace0, tag("<!-"), multispace0, expression(0)))(i)?;
-  Ok((
-    input,
-    ast::Expression::unterminated(ast::ExpressionValue::Output(ast::OutputExpression { output: output_name.to_string(), expression: Box::new(expr.into()), and_return: true }))
-  ))
+  Ok((i, ast::Expression::output(position, output_name.fragment(), expr, true)))
 }
 
 fn let_expression(i: Span) -> ParseResult<ast::Expression> {
-  let (input, (_, _, var_name, _, _, _, expr))
+  let (i, position) = position(i)?;
+  let (i, (_, _, var_name, _, _, _, expr))
     = tuple((tag("let"), multispace1, name, multispace0, char('='), multispace0, expression(0)))(i)?;
-  Ok((
-    input,
-    ast::Expression::unterminated(ast::ExpressionValue::Let(ast::LetExpression { var_name: var_name.to_string(), expression: Box::new(expr.into()), is_update: false }))
-  ))
+  Ok((i, ast::Expression::let_expression(position, var_name.fragment(), expr, false)))
 }
 
 fn update_expression(i: Span) -> ParseResult<ast::Expression> {
-  let (input, (var_name, _, _, _, expr))
+  let (i, position) = position(i)?;
+  let (i, (var_name, _, _, _, expr))
     = tuple((name, multispace0, char('='), multispace0, expression(0)))(i)?;
-  Ok((
-    input,
-    ast::Expression::unterminated(ast::ExpressionValue::Let(ast::LetExpression { var_name: var_name.to_string(), expression: Box::new(expr.into()), is_update: true }))
-  ))
+  Ok((i, ast::Expression::let_expression(position, var_name.fragment(), expr, true)))
 }
 
 fn if_expression(i: Span) -> ParseResult<ast::Expression> {
-  let (input, (_, _, test, _, if_true, else_clause)) = tuple((
+  let (i, position) = position(i)?;
+  let (i, (_, _, test, _, if_true, else_clause)) = tuple((
     tag("if"), multispace1, expression(0), multispace0, block_expression, 
     opt(tuple((multispace0, tag("else"), multispace0, block_expression)))
   ))(i)?;
   if let Some((_, _, _, if_false)) = else_clause {
-    Ok((input, ast::Expression::terminated(ast::ExpressionValue::If(ast::IfExpression { test: Box::new(test.into()), if_true: Box::new(if_true.into()), if_false: Box::new(if_false.into()) }))))
+    Ok((i, ast::Expression::if_expression(position, test, if_true, if_false)))
   } else {
-    Ok((input, ast::Expression::terminated(ast::ExpressionValue::If(ast::IfExpression { test: Box::new(test.into()), if_true: Box::new(if_true.into()), if_false: Box::new(ast::ExpressionValue::Empty) }))))
+    Ok((i, ast::Expression::if_expression(position, test, if_true, ast::Expression::empty(position))))
   }
 }
 
 fn while_expression(i: Span) -> ParseResult<ast::Expression> {
-  let (input, (_, _, expr, _, block)) = tuple((
+  let (i, position) = position(i)?;
+  let (i, (_, _, expr, _, block)) = tuple((
     tag("while"), multispace1, cut(expression(0)), multispace0, cut(block_expression)
   ))(i)?;
-  Ok((input, ast::Expression::terminated(ast::ExpressionValue::While(ast::WhileExpression { test: Box::new(expr.into()), body: Box::new(block.into())}))))
+  Ok((i, ast::Expression::while_expression(position, expr, block)))
 }
 
 fn listener(i: Span) -> ParseResult<ast::Listener> {
@@ -377,6 +388,7 @@ pub fn parse(i: &str) -> ParseResult<Vec<ast::TopLevel>> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use super::ast::Expr;
 
   fn mk_error<I, O>(msg: I, code: ErrorKind) -> IResult<I, O> {
     Err(nom::Err::Error(Error { input: msg, code }))
@@ -410,7 +422,7 @@ mod tests {
   fn parse_function() {
     assert_eq!(
       function(Span::new("foo(bar)")).unwrap().1, 
-      ast::Expression::unterminated(ast::ExpressionValue::FunctionCall("foo".to_string(), Box::new(ast::ExpressionValue::ReferenceToState("bar".to_string()))))
+      ast::Expression::unterminated(Expr::fun(0, 0, "foo", Expr::sref(4, 0, "bar")).build())
     );
   }
 
@@ -452,11 +464,9 @@ mod tests {
   fn parse_listener() {
     assert_eq!(
       listener(Span::new("foo.onChange: bar <- far;")).unwrap().1,
-      ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
-        ast::OutputExpression {
-          output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string())), and_return: false
-        }
-      )}
+      ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: 
+        Expr::output(14, 0, "bar", Expr::sref(7, 0, "far")).build()
+      }
     )
   }
 
@@ -464,13 +474,13 @@ mod tests {
   fn parse_block_listener() {
     assert_eq!(
       listener(Span::new("foo.onChange: {\n  bar <- far;\n  }")).unwrap().1,
-      ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Block(
-        vec!(ast::ExpressionValue::Output ( ast::OutputExpression {
-          output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string())), and_return: false
-        }), ast::ExpressionValue::Empty)
-      )}
+
+      ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: 
+        Expr::block(14, 0, vec!(Expr::output(4, 1, "bar", Expr::sref(7, 0, "far")), Expr::empty(19, 2))).build()
+      }
     )
   }
+
 
   #[test]
   fn parse_listeners() {
@@ -478,16 +488,12 @@ mod tests {
       listeners(Span::new("foo.onChange: bar <- far;
                            far.onWrite: bax <- fax;")).unwrap().1,
       vec!(
-        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
-          ast::OutputExpression {
-            output: String::from("bar"), expression: Box::new(ast::ExpressionValue::ReferenceToState("far".to_string())), and_return: false
-          }
-        )},
-        ast::Listener { trigger: String::from("far"), kind: ast::ListenerKind::OnWrite, implementation: ast::ExpressionValue::Output (
-          ast::OutputExpression {
-            output: String::from("bax"), expression: Box::new(ast::ExpressionValue::ReferenceToState("fax".to_string())), and_return: false
-          }
-        )}
+        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: 
+          Expr::output(14, 0, "bar", Expr::sref(7, 0, "far")).build()
+        },
+        ast::Listener { trigger: String::from("far"), kind: ast::ListenerKind::OnWrite, implementation:
+          Expr::output(66, 1, "bax", Expr::sref(7, 0, "fax")).build()
+        }
       )
     )
   }
@@ -499,17 +505,20 @@ mod tests {
   foo.onChange: bar <- far(la);
 }";
 
-  fn test_module_result<'a>() -> ast::Module<'a> {
+  fn test_module_result<'a>(offset: usize, line: u32) -> ast::Module<'a> {
     ast::Module {
       name: String::from("TestModule"),
-      handles: vec!(ast::Handle { position: unsafe { Span::new_from_raw_offset(22, 2, "", ()) }, name: unsafe { Span::new_from_raw_offset(22, 2, "foo", ()) }, usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
-      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: ast::ExpressionValue::Output (
-        ast::OutputExpression {
-          output: String::from("bar"),
-          expression: Box::new(ast::ExpressionValue::FunctionCall("far".to_string(), Box::new(ast::ExpressionValue::ReferenceToState(String::from("la"))))),
-          and_return: false
+      handles: vec!(
+        ast::Handle {
+          position: unsafe { Span::new_from_raw_offset(22 + offset, 1 + line, "", ()) }, 
+          name: unsafe { Span::new_from_raw_offset(22 + offset, 1 + line, "foo", ()) }, 
+          usages: vec!(ast::Usage::Read, ast::Usage::Write), 
+          h_type: ast::Type::Int 
         }
-      )}),
+      ),
+      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation:
+        Expr::output(offset + 62, line + 2, "bar", Expr::fun(7, 0, "far", Expr::sref(4, 0, "la"))).build()
+      }), 
       submodules: Vec::new(),
     }
   }
@@ -524,7 +533,7 @@ mod tests {
   fn parse_module() {
     assert_eq!(
       module(Span::new(TEST_MODULE_STRING)).unwrap().1,
-      test_module_result()
+      test_module_result(0, 1)
     )
   }
 
@@ -540,7 +549,7 @@ mod tests {
   fn parse_top_level() {
     assert_eq!(
       top_level(Span::new(TEST_MODULE_STRING)).unwrap().1,
-      ast::TopLevel::Module(test_module_result())   
+      ast::TopLevel::Module(test_module_result(0, 1))   
     );
     assert_eq!(
       top_level(Span::new(TEST_GRAPH_STRING)).unwrap().1,
@@ -553,17 +562,49 @@ mod tests {
     let test_str = TEST_MODULE_STRING.to_string() + "\n\n" + TEST_GRAPH_STRING;
     assert_eq!(
       top_levels(Span::new(&test_str)).unwrap().1,
-      vec!(ast::TopLevel::Module(test_module_result()), ast::TopLevel::Graph(test_graph_result()))
+      vec!(ast::TopLevel::Module(test_module_result(0, 1)), ast::TopLevel::Graph(test_graph_result()))
     )
   }
   
   #[test]
   fn parse_expression_test() {
-    let test_str = "foo || bar == far > baz";
-    dbg!(expression(0)(Span::new(test_str)));
-    let test_str = "foo < boo || far > baz";
-    dbg!(expression(0)(Span::new(test_str)));
-    let test_str = "offset == size(input.0) || input.0[offset] < '0' || input.0[offset] > '9'";
-    dbg!(expression(0)(Span::new(test_str)));
+    assert_eq!(
+      expression(0)(Span::new("foo || bar")).unwrap().1.value,
+      Expr::sref(0, 0, "foo").op(4, 0, ast::Operator::LogicalOr, Expr::sref(3, 0, "bar")).build()
+    );
+    assert_eq!(
+      expression(0)(Span::new("foo || bar == far > baz")).unwrap().1.value,
+      Expr::sref(0, 0, "foo").op(4, 0, ast::Operator::LogicalOr, 
+        Expr::sref(3, 0, "bar").op(4, 0, ast::Operator::Equality,
+          Expr::sref(3, 0, "far")
+        ).op(7, 0, ast::Operator::GreaterThan, 
+          Expr::sref(2, 0, "baz")
+        )
+      ).build()
+    );
+    assert_eq!(
+      expression(0)(Span::new("foo < boo || far > baz")).unwrap().1.value,
+      Expr::sref(0, 0, "foo").op(4, 0, ast::Operator::LessThan,
+        Expr::sref(2, 0, "boo")
+      ).op(6, 0, ast::Operator::LogicalOr,
+        Expr::sref(3, 0, "far").op(4, 0, ast::Operator::GreaterThan,
+          Expr::sref(2, 0, "baz")
+        )
+      ).build()
+    );
+    assert_eq!(
+      expression(0)(Span::new("offset == size(input.0) || input.0[offset] < '0' || input.0[offset] > '9'")).unwrap().1.value,
+      Expr::sref(0, 0, "offset").op(7, 0, ast::Operator::Equality,
+        Expr::fun(3, 0, "size", Expr::sref(5, 0, "input").tuple_ref(5, 0, 0))
+      ).op(17, 0, ast::Operator::LogicalOr, 
+        Expr::sref(3, 0, "input").tuple_ref(5, 0, 0).array_index(2, 0, Expr::sref(1, 0, "offset")).op(9, 0, ast::Operator::LessThan,
+          Expr::char(2, 0, '0')
+        )
+      ).op(25, 0, ast::Operator::LogicalOr,
+        Expr::sref(3, 0, "input").tuple_ref(5, 0, 0).array_index(2, 0, Expr::sref(1, 0, "offset")).op(9, 0, ast::Operator::GreaterThan,
+          Expr::char(2, 0, '9')
+        )
+      ).build()
+    );
   }
 }

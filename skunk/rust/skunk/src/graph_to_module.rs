@@ -163,24 +163,18 @@ impl <'a> ModuleContext<'a> {
                               .collect()
   }
 
-  fn generate_listeners(&self, handle_infos: &Vec<HandleInfo>) -> Vec<ast::Listener> {
+  fn generate_listeners(&self, handle_infos: &Vec<HandleInfo>) -> Vec<ast::Listener<'a>> {
     // all handles with read permissions need listeners
+    // TODO: Appropriate span locations for generated code.
     handle_infos.iter().filter(|handle_info| handle_info.handle.is_input())
                        .map(|handle_info| ast::Listener {
                          trigger: handle_info.handle.name.fragment().to_string(),
                          kind: ast::ListenerKind::OnWrite,
-                         implementation: ast::ExpressionValue::Output (ast::OutputExpression {
-                           output: "".to_string(), // TODO: this should be the field(s) that get(s) copied back; but in practice that's inferred from the submodule
-                           expression: Box::new(ast::ExpressionValue::CopyToSubModule(ast::CopyTo {
-                             state: handle_info.handle.name.fragment().to_string(),
-                             submodule_index: handle_info.writes_to_submodule,
-                             submodule_state: handle_info.submodule_handle.clone(),
-                           })),
-                           and_return: false
-                         })
-                       })
-                  .collect()
-  }
+                         implementation: ast::Expression::output(ast::Span::new(""), "", 
+                           ast::Expression::copy_to_submodule(ast::Span::new(""), handle_info.handle.name.fragment(), handle_info.writes_to_submodule, &handle_info.submodule_handle), 
+                           false).value
+                       }).collect()
+}
 
   fn submodules(&self) -> Vec<ast::Module<'a>> {
     // clone modules so the final data structure doesn't refer into the provided module list.
