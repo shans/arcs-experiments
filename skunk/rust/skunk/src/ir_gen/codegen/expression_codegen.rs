@@ -205,19 +205,7 @@ pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Modul
             Ok(StateValue::new_bool(phi.as_basic_value().into_int_value()))
           }
           ast::Operator::LogicalAnd => {
-            let lhs_value = expression_codegen(cg, module, state_alloca, &lhs)?.into_int_value()?;
-            let current_block = cg.builder.get_insert_block().unwrap();
-            let lhs_true = append_new_block(cg, "lhs_true")?;
-            let end_of_test = append_new_block(cg, "end_of_test")?;
-            cg.builder.build_conditional_branch(lhs_value, lhs_true, end_of_test);
-            cg.builder.position_at_end(lhs_true);
-            let rhs_value = expression_codegen(cg, module, state_alloca, &rhs)?.into_int_value()?;
-            cg.builder.build_unconditional_branch(end_of_test);
-
-            cg.builder.position_at_end(end_of_test);
-            let phi = cg.builder.build_phi(lhs_value.get_type(), "logical-and-result");
-            phi.add_incoming(&[(&lhs_value, current_block), (&rhs_value, lhs_true)]);
-            Ok(StateValue::new_bool(phi.as_basic_value().into_int_value()))
+            expression_logical_and(cg, |cg| expression_codegen(cg, module, state_alloca, &lhs), |cg| expression_codegen(cg, module, state_alloca, &rhs))
           }
           _ => todo!("Operator {:?} not yet implemented", op)
         }
@@ -240,4 +228,25 @@ pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Modul
   };
   cg.considering = old_considering;
   result
+}
+
+pub fn expression_logical_and<'ctx>(
+  cg: &mut CodegenState<'ctx>,
+  lhs: impl Fn(&mut CodegenState<'ctx>) -> CodegenResult<StateValue<'ctx>>, // ast::ExpressionValue<'ctx>,
+  rhs: impl Fn(&mut CodegenState<'ctx>) -> CodegenResult<StateValue<'ctx>>, // ast::ExpressionValue<'ctx>
+) -> CodegenResult<StateValue<'ctx>> {
+  let lhs_value = lhs(cg)?.into_int_value()?; // expression_codegen(cg, module, state_alloca, &lhs)?.into_int_value()?;
+  let lhs_block = cg.builder.get_insert_block().unwrap();
+  let lhs_true = append_new_block(cg, "lhs_true")?;
+  let end_of_test = append_new_block(cg, "end_of_test")?;
+  cg.builder.build_conditional_branch(lhs_value, lhs_true, end_of_test);
+  cg.builder.position_at_end(lhs_true);
+  let rhs_value = rhs(cg)?.into_int_value()?; // expression_codegen(cg, module, state_alloca, &rhs)?.into_int_value()?;
+  let rhs_block = cg.builder.get_insert_block().unwrap();
+  cg.builder.build_unconditional_branch(end_of_test);
+
+  cg.builder.position_at_end(end_of_test);
+  let phi = cg.builder.build_phi(lhs_value.get_type(), "logical-and-result");
+  phi.add_incoming(&[(&lhs_value, lhs_block), (&rhs_value, rhs_block)]);
+  Ok(StateValue::new_bool(phi.as_basic_value().into_int_value()))
 }

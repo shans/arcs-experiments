@@ -333,9 +333,41 @@ fn listeners(i: Span) -> ParseResult<Vec<ast::Listener>> {
   separated_list0(multispace1, listener)(i)
 }
 
+fn example_value(i: Span) -> ParseResult<(String, ast::ExampleInfo)> {
+  let (i, (is_update, name, expr)) = tuple((opt(char('!')), name, preceded(tuple((multispace0, char(':'), multispace0)), expression(0))))(i)?;
+  Ok((i, (name.fragment().to_string(), ast::ExampleInfo { value: expr, is_update: is_update.is_some() })))
+}
+
+fn example_values(i: Span) -> ParseResult<Vec<(String, ast::ExampleInfo)>> {
+  separated_list0(tuple((multispace0, char(','), multispace0)), example_value)(i)
+}
+
+fn example(i: Span) -> ParseResult<ast::Example> {
+  let (i, (mut inputs, mut expected)) = tuple((
+    example_values, preceded(tuple((multispace0, tag("->"), multispace0)), example_values)
+  ))(i)?;
+  Ok((i, ast::Example { inputs: inputs.drain(..).collect(), expected: expected.drain(..).collect() }))
+}
+
+fn examples(i: Span) -> ParseResult<ast::Examples> {
+  let (i, _) = tag("examples")(i)?;
+  let (i, examples) = cut(
+    preceded(multispace0, delimited(
+      terminated(char('{'), multispace0),
+      separated_list0(multispace0, terminated(example, tuple((multispace0, char(';'))))),
+      preceded(multispace0, char('}'))
+    ))
+  )(i)?;
+  Ok((i, ast::Examples { examples }))
+}
+
 fn module(i: Span) -> ParseResult<ast::Module> {
-  let (input, (_, _, name, _, _, _, handles, _, listeners, _, _))
-    = tuple((tag("module"), multispace1, uppercase_name, multispace0, char('{'), multispace0, handles, multispace0, listeners, multispace0, char('}')))(i)?;
+  let (input, (_, _, name, _, _, _, handles, _, listeners, _, examples, _, _))
+    = tuple((tag("module"), multispace1, uppercase_name, multispace0, char('{'), multispace0, handles, multispace0, listeners, multispace0, opt(examples), multispace0, char('}')))(i)?;
+  let examples = match examples {
+    None => ast::Examples { examples: Vec::new() },
+    Some(e) => e
+  };
   Ok((
     input,
     ast::Module {
@@ -343,6 +375,7 @@ fn module(i: Span) -> ParseResult<ast::Module> {
       handles,
       listeners,
       submodules: Vec::new(),
+      examples,
     }
   ))
 }
@@ -520,6 +553,7 @@ mod tests {
         Expr::output(offset + 62, line + 2, "bar", Expr::fun(7, 0, "far", Expr::sref(4, 0, "la"))).build()
       }), 
       submodules: Vec::new(),
+      examples: ast::Examples { examples: Vec::new() },
     }
   }
 

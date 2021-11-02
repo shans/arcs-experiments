@@ -315,11 +315,29 @@ pub struct ModuleInfo<'a> {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct ExampleInfo<'a> {
+  pub value: Expression<'a>,
+  pub is_update: bool,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Example<'a> {
+  pub inputs: HashMap<String, ExampleInfo<'a>>,
+  pub expected: HashMap<String, ExampleInfo<'a>>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Examples<'a> {
+  pub examples: Vec<Example<'a>>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct Module<'a> {
   pub name: String,
   pub handles: Vec<Handle<'a>>,
   pub listeners: Vec<Listener<'a>>,
   pub submodules: Vec<ModuleInfo<'a>>,
+  pub examples: Examples<'a>,
 }
 
 impl <'a> Module<'a> {

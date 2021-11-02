@@ -6,6 +6,8 @@ use inkwell::values::{BasicValueEnum, IntValue, PointerValue, PhiValue, Function
 use super::codegen_state::*;
 use super::ast;
 
+use super::codegen::*;
+
 use std::convert::TryInto;
 
 //
@@ -161,7 +163,8 @@ impl <'ctx> StatePointer<'ctx> {
         Ok(())
       }
       PointerKind::StaticMemRegion => {
-        cg.builder.build_store(self.pointer, self.pointer.get_type().const_null());
+        // TODO this probably doesn't work in all cases
+        cg.builder.build_store(self.pointer, self.pointer.get_type().get_element_type().into_pointer_type().const_null());
         Ok(())
       }
       PointerKind::DynamicMemRegion => {
@@ -169,6 +172,16 @@ impl <'ctx> StatePointer<'ctx> {
         cg.builder.build_store(memregion_size_ptr(cg, self.pointer)?, cg.uint_const(0));
         Ok(())
       }
+    }
+  }
+
+  pub fn default_value(&self, cg: &CodegenState<'ctx>) -> CodegenResult<StateValue> {
+    if self.pointer_type.len() != 1 {
+      todo!("handle default inline aggregate values");
+    }
+    match self.pointer_type[0] {
+      TypePrimitive::Int => Ok(StateValue::new_int(cg.uint_const(0))),
+      _ => todo!("handle default of this type")
     }
   }
 }
@@ -298,7 +311,18 @@ impl <'ctx> StateValue<'ctx> {
           _ => todo!("Implement debug for {:?}", value_type)
         }
       }
-      _ => todo!("Implement debug for {:?}", self.value)
+      ValueParts::DynamicMemRegion(data, size) => {
+        // TODO: this is only correct if an array of Char
+        let fmt = cg.builder.build_global_string_ptr("[DynString %.*s]\n", "fmt").as_pointer_value();
+        cg.builder.build_call(printf, &[fmt.into(), size.into(), data.into()], "_");
+        Ok(())
+      }
+      ValueParts::StaticMemRegion(data) => {
+        let fmt = cg.builder.build_global_string_ptr("[Static TODO]\n", "fmt").as_pointer_value();
+        cg.builder.build_call(printf, &[fmt.into()], "_");
+        Ok(())
+      }
+      _ => todo!("Implement debug for {:?} {:?}", self.value, self.value_type)
     }
   }
 
@@ -395,11 +419,43 @@ impl <'ctx> StateValue<'ctx> {
     }
     Ok(())
   }
-  pub fn equals(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
-    self.apply_int_predicate(cg, IntPredicate::EQ, other)
+  pub fn equals(&self, cg: &mut CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    let value_type = self.only_value_type()?;
+    match value_type {
+      TypePrimitive::Char | TypePrimitive::Int | TypePrimitive::Bool => self.apply_int_predicate(cg, IntPredicate::EQ, other),
+      TypePrimitive::PointerTo(struct_type) => {
+        let mut result = StateValue::new_bool(cg.context.bool_type().const_int(1, false));
+        for (idx, _member_type) in struct_type.iter().enumerate() {
+          let lhs = self.get_tuple_index(cg, idx as u32)?;
+          let rhs = other.get_tuple_index(cg, idx as u32)?;
+          // TODO: this clone of result is unpleasant
+          result = expression_logical_and(cg, move |_cg| Ok(result.clone()), |cg| lhs.equals(cg, &rhs))?
+        }
+        Ok(result)
+      }
+      TypePrimitive::DynamicArrayOf(array_member_type) => {
+        // specialization for array of single type is to use memcmp
+        if array_member_type.len() == 1 {
+          let arr_type = &array_member_type[0];
+          match arr_type {
+            TypePrimitive::Char | TypePrimitive::Int | TypePrimitive::Bool => {
+              expression_logical_and(cg,
+                |cg| self.size(cg)?.equals(cg, &other.size(cg)?),
+                |cg| StateValue::new_int(cg.uint_const(0)).equals(cg, &StateValue::new_int(memcmp(cg, self.into_pointer_value()?, other.into_pointer_value()?, self.size(cg)?.into_int_value()?)))
+              )
+              //Ok(StateValue::new_bool(cg.context.bool_type().const_int(1, false)))
+            }
+            _ => todo!("")
+          }
+        } else {
+          todo!("")
+        }
+      }
+      _ => todo!("equality for {:?}", value_type)
+    }
   }
 
-  pub fn logical_or(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+  pub fn numeric_or(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
     let value_type = self.only_value_type()?;
     let other_value_type = other.only_value_type()?;
     if *value_type != TypePrimitive::Bool || *other_value_type != TypePrimitive::Bool {
@@ -438,7 +494,7 @@ impl <'ctx> StateValue<'ctx> {
         let result = cg.builder.build_int_compare(predicate, self.into_int_value()?, other.into_int_value()?, "eq");
         Ok(StateValue::new_bool(result))
       }
-      _ => todo!("Equality for non-primitive types")
+      _ => todo!("IntPredicate for {:?}", value_type)
     }
   }
 
@@ -462,8 +518,15 @@ impl <'ctx> StateValue<'ctx> {
   }
 
   pub fn subtract(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
-    let lhs = self.into_int_value()?;
-    let rhs = other.into_int_value()?;
+    let mut lhs = self.into_int_value()?;
+    let mut rhs = other.into_int_value()?;
+    let lhs_bitsize = self.llvm_type().into_int_type().get_bit_width();
+    let rhs_bitsize = other.llvm_type().into_int_type().get_bit_width();
+    if lhs_bitsize > rhs_bitsize {
+      rhs = cg.builder.build_int_s_extend(rhs, self.llvm_type().into_int_type(), "sext_rhs");
+    } else if rhs_bitsize > lhs_bitsize {
+      lhs = cg.builder.build_int_s_extend(lhs, other.llvm_type().into_int_type(), "sext_lhs");
+    }
     Ok(StateValue::new_int(cg.builder.build_int_sub(lhs, rhs, "subtract")))
   }
 }

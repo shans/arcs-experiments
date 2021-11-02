@@ -50,7 +50,7 @@ pub fn graph_to_module<'a>(graph: &'a graph::Graph, modules: &'a Vec<&ast::Modul
   }
   let listeners = module_context.generate_listeners(&handle_infos);
   let handles = handle_infos.drain(..).map(|info| info.handle).collect();
-  Ok(ast::Module { name: name.to_string(), handles, listeners, submodules })
+  Ok(ast::Module { name: name.to_string(), handles, listeners, submodules, examples: ast::Examples { examples: Vec::new() } })
 }
 
 pub struct ModuleContext<'a> {

@@ -17,9 +17,9 @@ fn ee_for_string<F>(module: &str, func: F) -> CodegenStatus
   if ast::modules(&ast).len() == 1 && ast::graphs(&ast).len() == 0 {
     let mut jit_info = JitInfo::new();
     let modules = codegen(&context, &mut jit_info, &ast::modules(&ast)[0])?;
+    //modules[0].print_to_stderr();
     let ee = jit_info.execution_engine.unwrap();
     func(ee);
-    // modules[0].print_to_stderr();
   } else {
     let mut graph = graph_builder::make_graph(ast::graphs(&ast));
     graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
@@ -68,6 +68,46 @@ macro_rules! state_struct {
       } 
 
       type [<$name Func>] = unsafe extern "C" fn(*mut [<$name State>]) -> ();
+      type [<$name PrepFunc>] = unsafe extern "C" fn() -> *mut [<$name State>];
+      type [<$name CheckFunc>] = unsafe extern "C" fn(*mut [<$name State>]) -> u64;
+    }
+  }
+}
+
+#[macro_export]
+macro_rules! check_examples {
+  ($name:ident, $defn:ident, $count:expr) => {
+    paste! {
+      #[test]
+      fn [<check_examples_for_ $name>]() -> CodegenStatus {
+        ee_for_string($defn, |ee: ExecutionEngine| {
+          unsafe {
+            for i in (0..$count) {
+              let prep_prefix = concat!(stringify!($name), "__example_prep_");
+              let check_prefix = concat!(stringify!($name), "__example_check_");
+              let prep = prep_prefix.to_string() + &i.to_string();
+              let check = check_prefix.to_string() + &i.to_string();
+              let update = concat!(stringify!($name), "_update");
+
+              let function: JitFunction<[<$name PrepFunc>]> = ee.get_function(&prep).unwrap();
+              let state = function.call();
+
+              let update: JitFunction<[<$name Func>]> = ee.get_function(update).unwrap();
+              while (&*state).bitfield > 0 {
+                update.call(state);
+              }
+
+              let final_state = format!("{:#?}", &*state);
+              let check: JitFunction<[<$name CheckFunc>]> = ee.get_function(&check).unwrap();
+              let r = check.call(state);
+              if (r != 0) {
+                println!("Unexpected result for example {}. Output of this example:\n {}\n. Error bitfield: {}", i, final_state, r);
+              }
+              assert_eq!(r, 0);
+            }
+          }
+        })
+      }
     }
   }
 }
@@ -112,77 +152,77 @@ module MyModule2 {
 MyModule -> MyModule2;
 ";
 
-  state_struct!(NestedModule, foo: u64, bar: u64);
-  state_struct!(MultiModule, foo: u64, bar: u64, h0: u64 | my_module:NestedModuleState, my_module2:NestedModuleState);
+state_struct!(NestedModule, foo: u64, bar: u64);
+state_struct!(MultiModule, foo: u64, bar: u64, h0: u64 | my_module:NestedModuleState, my_module2:NestedModuleState);
 
 
-  #[test]
-  fn jit_multi_module_codegen_runs() -> CodegenStatus {
-    ee_for_string(MULTI_MODULE_STRING, |ee: ExecutionEngine| {
-      unsafe {
-        let function: JitFunction<MultiModuleFunc> = ee.get_function("Main_update").unwrap();
-        let mut state = MultiModuleState { foo: 0, foo_upd: 10, h0: 0, h0_upd: 0, bar: 0, bar_upd: 0, bitfield: 0x1, 
-                          my_module: NestedModuleState { foo: 0, foo_upd: 0, bar: 0, bar_upd: 0, bitfield: 0 },
-                          my_module2: NestedModuleState { foo: 0, foo_upd: 0, bar: 0, bar_upd: 0, bitfield: 0 },
-                        };
+#[test]
+fn jit_multi_module_codegen_runs() -> CodegenStatus {
+  ee_for_string(MULTI_MODULE_STRING, |ee: ExecutionEngine| {
+    unsafe {
+      let function: JitFunction<MultiModuleFunc> = ee.get_function("Main_update").unwrap();
+      let mut state = MultiModuleState { foo: 0, foo_upd: 10, h0: 0, h0_upd: 0, bar: 0, bar_upd: 0, bitfield: 0x1, 
+                        my_module: NestedModuleState { foo: 0, foo_upd: 0, bar: 0, bar_upd: 0, bitfield: 0 },
+                        my_module2: NestedModuleState { foo: 0, foo_upd: 0, bar: 0, bar_upd: 0, bitfield: 0 },
+                      };
 
-        // After a single call to update, foo_upd has been copied into my_module.foo_upd, then my_module has been
-        // iterated until stable (foo_upd -> foo & bar_upd, bar_upd -> bar); new state has been copied back (h0_upd).
-        // my_module2 has not been changed.
-        function.call(&mut state);
-        assert_eq!(state.bitfield, 0x4);
-        assert_eq!(state.foo, 10);
-        assert_eq!(state.foo_upd, 0);
-        assert_eq!(state.h0_upd, 10);
-        assert_eq!(state.my_module.foo, 10);
-        assert_eq!(state.my_module.bar, 10);
-        assert_eq!(state.my_module2.foo, 0);
-        assert_eq!(state.my_module2.bar, 0);
+      // After a single call to update, foo_upd has been copied into my_module.foo_upd, then my_module has been
+      // iterated until stable (foo_upd -> foo & bar_upd, bar_upd -> bar); new state has been copied back (h0_upd).
+      // my_module2 has not been changed.
+      function.call(&mut state);
+      assert_eq!(state.bitfield, 0x4);
+      assert_eq!(state.foo, 10);
+      assert_eq!(state.foo_upd, 0);
+      assert_eq!(state.h0_upd, 10);
+      assert_eq!(state.my_module.foo, 10);
+      assert_eq!(state.my_module.bar, 10);
+      assert_eq!(state.my_module2.foo, 0);
+      assert_eq!(state.my_module2.bar, 0);
 
-        // After a second call to update, h0_upd has been copied into my_module2.foo_upd, then my_module2 has been
-        // iterated until stable (foo_upd -> foo & bar_upd, bar_upd -> bar); new state has been copied back (bar_upd).
-        // my_module has not been changed.
-        function.call(&mut state);
-        assert_eq!(state.bitfield, 0x2);
-        assert_eq!(state.h0, 10);
-        assert_eq!(state.h0_upd, 0);
-        assert_eq!(state.bar_upd, 10);
-        assert_eq!(state.my_module.foo, 10);
-        assert_eq!(state.my_module.bar, 10);
-        assert_eq!(state.my_module2.foo, 10);
-        assert_eq!(state.my_module2.bar, 10);
-      }
-    })
-  }
+      // After a second call to update, h0_upd has been copied into my_module2.foo_upd, then my_module2 has been
+      // iterated until stable (foo_upd -> foo & bar_upd, bar_upd -> bar); new state has been copied back (bar_upd).
+      // my_module has not been changed.
+      function.call(&mut state);
+      assert_eq!(state.bitfield, 0x2);
+      assert_eq!(state.h0, 10);
+      assert_eq!(state.h0_upd, 0);
+      assert_eq!(state.bar_upd, 10);
+      assert_eq!(state.my_module.foo, 10);
+      assert_eq!(state.my_module.bar, 10);
+      assert_eq!(state.my_module2.foo, 10);
+      assert_eq!(state.my_module2.bar, 10);
+    }
+  })
+}
 
-  static NEW_MEMREGION_TEST_STRING: &str = "
+static NEW_MEMREGION_TEST_STRING: &str = "
 module ModuleWithNew {
   bar: writes MemRegion;
   foo: reads Int;
 
   foo.onChange: bar <- new(foo);
 }
-  ";
+";
 
-  state_struct!(ModuleWithNew, bar: MemRegion, foo: u64);
+state_struct!(ModuleWithNew, bar: MemRegion, foo: u64);
 
-  #[test]
-  fn jit_new_memregion_codegen_runs() -> CodegenStatus {
-    ee_for_string(NEW_MEMREGION_TEST_STRING, |ee: ExecutionEngine| {
-      unsafe {
-        let function: JitFunction<ModuleWithNewFunc> = ee.get_function("ModuleWithNew_update").unwrap();
-        let mut state = ModuleWithNewState { bar: MemRegion::empty(), bar_upd: MemRegion::empty(), foo: 0, foo_upd: 10, bitfield: 0x2 };
-        function.call(&mut state);
-        assert_eq!(state.bitfield, 0x1);
-        assert_eq!(state.foo, 10);
-        assert_eq!(state.foo_upd, 0);
-        assert_eq!(state.bar_upd.size, 10);
-        assert_ne!(state.bar_upd.data, 0);
-      }
-    })
-  }
+#[test]
+fn jit_new_memregion_codegen_runs() -> CodegenStatus {
+  ee_for_string(NEW_MEMREGION_TEST_STRING, |ee: ExecutionEngine| {
+    unsafe {
+      let function: JitFunction<ModuleWithNewFunc> = ee.get_function("ModuleWithNew_update").unwrap();
+      let mut state = ModuleWithNewState { bar: MemRegion::empty(), bar_upd: MemRegion::empty(), foo: 0, foo_upd: 10, bitfield: 0x2 };
+      function.call(&mut state);
+      assert_eq!(state.bitfield, 0x1);
+      assert_eq!(state.foo, 10);
+      assert_eq!(state.foo_upd, 0);
+      assert_eq!(state.bar_upd.size, 10);
+      assert_ne!(state.bar_upd.data, 0);
+    }
+  })
+}
 
-  static COPY_MEMREGION_TEST_STRING: &str = "
+static COPY_MEMREGION_TEST_STRING: &str = "
 module Writer {
   size_in: reads Int;
   region: writes MemRegion;
@@ -198,36 +238,36 @@ module Reader {
 }
 
 Writer -> Reader;
-  ";
+";
 
-  state_struct!(Writer, size_in: u64, region: MemRegion);
-  state_struct!(Reader, region: MemRegion, size_out: u64);
-  state_struct!(CopyMemRegionMain, size_in: u64, size_out: u64, h0: MemRegion | writer: WriterState, reader: ReaderState);
+state_struct!(Writer, size_in: u64, region: MemRegion);
+state_struct!(Reader, region: MemRegion, size_out: u64);
+state_struct!(CopyMemRegionMain, size_in: u64, size_out: u64, h0: MemRegion | writer: WriterState, reader: ReaderState);
 
-  #[test]
-  fn jit_copy_memregion_codegen_runs() -> CodegenStatus {
-    ee_for_string(COPY_MEMREGION_TEST_STRING, |ee: ExecutionEngine| {
-      unsafe {
-        let function: JitFunction<CopyMemRegionMainFunc> = ee.get_function("Main_update").unwrap();  
-        let mut state = CopyMemRegionMainState {
-          size_in: 0, size_in_upd: 50, size_out: 0, size_out_upd: 0, h0: MemRegion::empty(), h0_upd: MemRegion::empty(), bitfield: 0x1,
-          writer: WriterState { size_in: 0, size_in_upd: 0, region: MemRegion::empty(), region_upd: MemRegion::empty(), bitfield: 0},
-          reader: ReaderState { size_out: 0, size_out_upd: 0, region: MemRegion::empty(), region_upd: MemRegion::empty(), bitfield: 0},
-        };
+#[test]
+fn jit_copy_memregion_codegen_runs() -> CodegenStatus {
+  ee_for_string(COPY_MEMREGION_TEST_STRING, |ee: ExecutionEngine| {
+    unsafe {
+      let function: JitFunction<CopyMemRegionMainFunc> = ee.get_function("Main_update").unwrap();  
+      let mut state = CopyMemRegionMainState {
+        size_in: 0, size_in_upd: 50, size_out: 0, size_out_upd: 0, h0: MemRegion::empty(), h0_upd: MemRegion::empty(), bitfield: 0x1,
+        writer: WriterState { size_in: 0, size_in_upd: 0, region: MemRegion::empty(), region_upd: MemRegion::empty(), bitfield: 0},
+        reader: ReaderState { size_out: 0, size_out_upd: 0, region: MemRegion::empty(), region_upd: MemRegion::empty(), bitfield: 0},
+      };
 
-        function.call(&mut state);
-        assert_eq!(state.bitfield, 0x4);
-        assert_eq!(state.h0_upd.size, 50);
-        assert_ne!(state.h0_upd.data, 0);
+      function.call(&mut state);
+      assert_eq!(state.bitfield, 0x4);
+      assert_eq!(state.h0_upd.size, 50);
+      assert_ne!(state.h0_upd.data, 0);
 
-        function.call(&mut state);
-        assert_eq!(state.bitfield, 0x2);
-        assert_eq!(state.size_out_upd, 50);
-      }
-    })
-  }
+      function.call(&mut state);
+      assert_eq!(state.bitfield, 0x2);
+      assert_eq!(state.size_out_upd, 50);
+    }
+  })
+}
 
-  static STRING_TEST_STRING: &str = "
+static STRING_TEST_STRING: &str = "
 module CreateString {
   inp: reads Int;
   out: writes String;
@@ -243,31 +283,31 @@ module CharFromString {
 }
 
 CreateString -> CharFromString;
-  ";
+";
 
-  state_struct!(CreateString, inp: u64, out: MemRegion);
-  state_struct!(CharFromString, inp: MemRegion, out: u8);
-  state_struct!(StringTestMain, inp: u64, out: u8, h0: MemRegion | writer: CreateStringState, reader: CharFromStringState);
+state_struct!(CreateString, inp: u64, out: MemRegion);
+state_struct!(CharFromString, inp: MemRegion, out: u8);
+state_struct!(StringTestMain, inp: u64, out: u8, h0: MemRegion | writer: CreateStringState, reader: CharFromStringState);
 
-  #[test]
-  fn jit_create_string_codegen_runs() -> CodegenStatus {
-    ee_for_string(STRING_TEST_STRING, |ee: ExecutionEngine| {
-      unsafe {
-        let function: JitFunction<StringTestMainFunc> = ee.get_function("Main_update").unwrap();
-        let mut state = StringTestMainState {
-          inp: 0, inp_upd: 10, h0: MemRegion::empty(), h0_upd: MemRegion::empty(), out: 0, out_upd: 0, bitfield: 0x1,
-          writer: CreateStringState { inp: 0, inp_upd: 0, out: MemRegion::empty(), out_upd: MemRegion::empty(), bitfield: 0x0},
-          reader: CharFromStringState { inp: MemRegion::empty(), inp_upd: MemRegion::empty(), out: 0, out_upd: 0, bitfield: 0x0}
-        };
+#[test]
+fn jit_create_string_codegen_runs() -> CodegenStatus {
+  ee_for_string(STRING_TEST_STRING, |ee: ExecutionEngine| {
+    unsafe {
+      let function: JitFunction<StringTestMainFunc> = ee.get_function("Main_update").unwrap();
+      let mut state = StringTestMainState {
+        inp: 0, inp_upd: 10, h0: MemRegion::empty(), h0_upd: MemRegion::empty(), out: 0, out_upd: 0, bitfield: 0x1,
+        writer: CreateStringState { inp: 0, inp_upd: 0, out: MemRegion::empty(), out_upd: MemRegion::empty(), bitfield: 0x0},
+        reader: CharFromStringState { inp: MemRegion::empty(), inp_upd: MemRegion::empty(), out: 0, out_upd: 0, bitfield: 0x0}
+      };
 
-        function.call(&mut state);
-        function.call(&mut state);
-        assert_eq!(state.out_upd, 'c' as u8);
-      }
-    })
-  }
+      function.call(&mut state);
+      function.call(&mut state);
+      assert_eq!(state.out_upd, 'c' as u8);
+    }
+  })
+}
 
-  static TUPLE_TEST_STRING: &str = "
+static TUPLE_TEST_STRING: &str = "
 module CreateTuple {
   inp: reads Int;
   out: writes (Int, String);
@@ -287,34 +327,34 @@ module ReadTuple {
 }
 
 CreateTuple -> ReadTuple;
-  ";
+";
 
-  state_struct!(CreateTuple, inp: u64, out: *const (u64, MemRegion));
-  state_struct!(ReadTuple, inp: *const (u64, MemRegion), out1: u64, out2: MemRegion);
-  state_struct!(TupleMain, inp: u64, out1: u64, out2: MemRegion, h0: *const (u64, MemRegion) | writer: CreateTupleState, reader: ReadTupleState);
+state_struct!(CreateTuple, inp: u64, out: *const (u64, MemRegion));
+state_struct!(ReadTuple, inp: *const (u64, MemRegion), out1: u64, out2: MemRegion);
+state_struct!(TupleMain, inp: u64, out1: u64, out2: MemRegion, h0: *const (u64, MemRegion) | writer: CreateTupleState, reader: ReadTupleState);
 
-  #[test]
-  fn jit_create_tuple_codegen_runs() -> CodegenStatus {
-    ee_for_string(TUPLE_TEST_STRING, |ee: ExecutionEngine| {
-      unsafe {
-        let function: JitFunction<TupleMainFunc> = ee.get_function("Main_update").unwrap();
-        let mut state = TupleMainState {
-          inp: 0, inp_upd: 10, out1: 0, out1_upd: 0, out2: MemRegion::empty(), out2_upd: MemRegion::empty(), 
-          h0: ptr::null(), h0_upd: ptr::null(),
-          bitfield: 0x1,
-          writer: CreateTupleState { inp: 0, inp_upd: 0, out: ptr::null(), out_upd: ptr::null(), bitfield: 0x0 },
-          reader: ReadTupleState { inp: ptr::null(), inp_upd: ptr::null(), out1: 0, out1_upd: 0, out2: MemRegion::empty(), out2_upd: MemRegion::empty(), bitfield: 0x0}
-        };
+#[test]
+fn jit_create_tuple_codegen_runs() -> CodegenStatus {
+  ee_for_string(TUPLE_TEST_STRING, |ee: ExecutionEngine| {
+    unsafe {
+      let function: JitFunction<TupleMainFunc> = ee.get_function("Main_update").unwrap();
+      let mut state = TupleMainState {
+        inp: 0, inp_upd: 10, out1: 0, out1_upd: 0, out2: MemRegion::empty(), out2_upd: MemRegion::empty(), 
+        h0: ptr::null(), h0_upd: ptr::null(),
+        bitfield: 0x1,
+        writer: CreateTupleState { inp: 0, inp_upd: 0, out: ptr::null(), out_upd: ptr::null(), bitfield: 0x0 },
+        reader: ReadTupleState { inp: ptr::null(), inp_upd: ptr::null(), out1: 0, out1_upd: 0, out2: MemRegion::empty(), out2_upd: MemRegion::empty(), bitfield: 0x0}
+      };
 
-        function.call(&mut state);
-        function.call(&mut state);
-        assert_eq!(state.out1_upd, 10);
-        assert_eq!(state.out2_upd.size, 13);
-      }
-    })
-  }
+      function.call(&mut state);
+      function.call(&mut state);
+      assert_eq!(state.out1_upd, 10);
+      assert_eq!(state.out2_upd.size, 13);
+    }
+  })
+}
 
-  static SYNTAX_TEST_STRING: &str = "
+static SYNTAX_TEST_STRING: &str = "
 module SyntaxTest {
   input: reads (String, Int);
   output: writes (String, Int);
@@ -339,32 +379,47 @@ module SyntaxTest {
     result <- result;
     output <- (input.0, offset);
   }
-}
-  ";
 
-  state_struct!(SyntaxTest, inp: *const (MemRegion, u64), out: *const(MemRegion, u64), result: u64, error: u64);
+  examples {
+    !input: (\"420e\", 0) -> result: 420;
+    !input: (\"420e\", 1) -> result: 20;
+    !input: (\"420e\", 2) -> result: 0;
+    !input: (\"420e\", 3) -> error: 1;
 
-  #[test]
-  fn jit_syntax_test_codegen_runs() -> CodegenStatus {
-    ee_for_string(SYNTAX_TEST_STRING, |ee: ExecutionEngine| {
-      unsafe {
-        let function: JitFunction<SyntaxTestFunc> = ee.get_function("SyntaxTest_update").unwrap();
-        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
-        function.call(&mut state);
-        assert_eq!(state.bitfield, 0x8); // error updated
-        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("15 Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
-        function.call(&mut state);
-        assert_eq!(state.bitfield, 0x6); // result, output updated
-        assert_eq!((*state.out_upd).1, 2); // offset advanced by 2
-        assert_eq!(state.result_upd, 15); // result parsed from string
-        let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
-        function.call(&mut state);
-        assert_eq!(state.bitfield, 0x8); // error updated
-      }
-    }) 
+    !input: (\"in text 151 end text\", 4) -> error: 1;
+    !input: (\"in text 151 end text\", 7) -> error: 1;
+    !input: (\"in text 151 end text\", 8) -> result: 151, output: (\"in text 151 end text\", 11);
+
+    !input: (\"54 is a number\", 0) -> result: 54, output: (\"54 is a number\", 2);
   }
+}
+";
 
-  static WHILE_TEST_STRING: &str = "
+state_struct!(SyntaxTest, inp: *const (MemRegion, u64), out: *const(MemRegion, u64), result: u64, error: u64);
+
+check_examples!(SyntaxTest, SYNTAX_TEST_STRING, 8);
+
+#[test]
+fn jit_syntax_test_codegen_runs() -> CodegenStatus {
+  ee_for_string(SYNTAX_TEST_STRING, |ee: ExecutionEngine| {
+    unsafe {
+      let function: JitFunction<SyntaxTestFunc> = ee.get_function("SyntaxTest_update").unwrap();
+      let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
+      function.call(&mut state);
+      assert_eq!(state.bitfield, 0x8); // error updated
+      let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("15 Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
+      function.call(&mut state);
+      assert_eq!(state.bitfield, 0x6); // result, output updated
+      assert_eq!((*state.out_upd).1, 2); // offset advanced by 2
+      assert_eq!(state.result_upd, 15); // result parsed from string
+      let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 0), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
+      function.call(&mut state);
+      assert_eq!(state.bitfield, 0x8); // error updated
+    }
+  }) 
+}
+
+static WHILE_TEST_STRING: &str = "
 module WhileTest {
   len: reads Int;
   string: reads String;
@@ -384,18 +439,79 @@ module WhileTest {
     result <- x;
   }
 }  
-  ";
+";
 
-  state_struct!(WhileTest, len: u64, string: MemRegion, result: u64);
+state_struct!(WhileTest, len: u64, string: MemRegion, result: u64);
 
-  #[test]
-  fn jit_while_test_codegen_runs() -> CodegenStatus {
-    ee_for_string(WHILE_TEST_STRING, |ee: ExecutionEngine| {
-      unsafe {
-        let function: JitFunction<WhileTestFunc> = ee.get_function("WhileTest_update").unwrap();
-        let mut state = WhileTestState { len: 0, len_upd: 5, string: MemRegion::from_str("42360 "), string_upd: MemRegion::empty(), result: 0, result_upd: 0, bitfield: 0x1 };
-        function.call(&mut state);
-        dbg!(state);
-      }
-    })
+#[test]
+fn jit_while_test_codegen_runs() -> CodegenStatus {
+  ee_for_string(WHILE_TEST_STRING, |ee: ExecutionEngine| {
+    unsafe {
+      let function: JitFunction<WhileTestFunc> = ee.get_function("WhileTest_update").unwrap();
+      let mut state = WhileTestState { len: 0, len_upd: 5, string: MemRegion::from_str("42360 "), string_upd: MemRegion::empty(), result: 0, result_upd: 0, bitfield: 0x1 };
+      function.call(&mut state);
+      dbg!(state);
+    }
+  })
+}
+
+static EXAMPLES_TEST_STRING: &str = "
+module ExampleTest {
+  a: reads Int;
+  b: reads Int;
+  c: writes Int;
+  a.onChange: c <- a + b;
+  b.onChange: c <- a + b;
+
+  examples {
+    a: 4, !b: 5 -> c: 9;
+    !a: 10, b: 1 -> c: 15;
   }
+}
+";
+
+state_struct!(ExampleTest, a: u64, b: u64, c: u64);
+
+#[test]
+fn compile_and_run_examples() -> CodegenStatus {
+  ee_for_string(EXAMPLES_TEST_STRING, |ee: ExecutionEngine| {
+    unsafe {
+      let function: JitFunction<ExampleTestPrepFunc> = ee.get_function("ExampleTest__example_prep_0").unwrap();
+      let state = function.call();
+      assert_eq!((&*state).a, 4);
+      assert_eq!((&*state).b_upd, 5);
+      assert_eq!((&*state).bitfield, 0x2);
+
+      let update: JitFunction<ExampleTestFunc> = ee.get_function("ExampleTest_update").unwrap();
+      while (&*state).bitfield > 0 {
+        update.call(state);
+      }
+      assert_eq!((&*state).c, 9);
+
+      let check: JitFunction<ExampleTestCheckFunc> = ee.get_function("ExampleTest__example_check_0").unwrap();
+      let r = check.call(state);
+      assert_eq!(r, 0);
+    }
+
+    unsafe {
+      let function: JitFunction<ExampleTestPrepFunc> = ee.get_function("ExampleTest__example_prep_1").unwrap();
+      let state = function.call();
+      assert_eq!((&*state).a_upd, 10);
+      assert_eq!((&*state).b, 1);
+      assert_eq!((&*state).bitfield, 0x1);
+
+      let update: JitFunction<ExampleTestFunc> = ee.get_function("ExampleTest_update").unwrap();
+      while (&*state).bitfield > 0 {
+        update.call(state);
+      }
+      assert_eq!((&*state).c, 11);
+
+      let check: JitFunction<ExampleTestCheckFunc> = ee.get_function("ExampleTest__example_check_1").unwrap();
+      let r = check.call(state);
+      assert_eq!(r, 0x4);
+    }
+  })
+}
+
+// The second example for ExampleTest is purposefully incorrect for testing.
+check_examples!(ExampleTest, EXAMPLES_TEST_STRING, 1);
