@@ -35,7 +35,7 @@ pub struct CodegenState<'ctx> {
   pub function_pass_manager: PassManager<FunctionValue<'ctx>>,
   pub locals: HashMap<String, StatePointer<'ctx>>,
   pub break_target: Vec<BasicBlock<'ctx>>,
-  pub considering: Option<&'ctx ExpressionValue<'ctx>>,
+  pub considering: Option<&'ctx ExpressionValue>,
 }
 
 impl <'ctx> CodegenState<'ctx> {

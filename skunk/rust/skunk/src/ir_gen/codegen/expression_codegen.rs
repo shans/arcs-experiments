@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module<'ctx>, state_alloca: PointerValue<'ctx>, expression: &'ctx ast::ExpressionValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, state_alloca: PointerValue<'ctx>, expression: &'ctx ast::ExpressionValue) -> CodegenResult<StateValue<'ctx>> {
   let old_considering = cg.considering;
   cg.considering = Some(expression);
   let result = match &expression.info {

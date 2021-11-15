@@ -34,7 +34,7 @@ pub fn resolve_graph(modules: &Vec<&ast::Module>, graph: &mut graph::Graph) -> R
   success?; Ok(())
 }
 
-pub fn find_module_by_name<'a>(modules: &'a Vec<&ast::Module>, name: &str) -> Option<&'a ast::Module<'a>> {
+pub fn find_module_by_name<'a>(modules: &Vec<&'a ast::Module>, name: &str) -> Option<&'a ast::Module> {
   modules.iter().find(|&&module| module.name == name).map(|module| *module)
 }
 
@@ -42,13 +42,13 @@ fn types_match(left: &ast::Handle, right: &ast::Handle) -> bool {
   left.h_type == right.h_type
 }
 
-fn matching_connections<'a, 'b>(from_module: &'a ast::Module<'a>, to_module: &'b ast::Module<'b>) -> Vec<(&'a str, &'b str, ast::Type)> {
+fn matching_connections<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast::Module) -> Vec<(&'a str, &'b str, ast::Type)> {
   let from_connections = from_module.outputs();
   let to_connections = to_module.inputs();
   from_connections.iter().map(|from_con| {
     to_connections.iter().filter_map(move |to_con| {
       if types_match(from_con, to_con) {
-        Some((*from_con.name.fragment(), *to_con.name.fragment(), from_con.h_type.clone()))
+        Some((from_con.name.as_str(), to_con.name.as_str(), from_con.h_type.clone()))
       } else {
         None
       }

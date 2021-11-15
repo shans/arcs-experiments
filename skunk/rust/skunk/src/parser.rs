@@ -19,6 +19,7 @@ use nom_locate::{position, LocatedSpan};
 type Span<'a> = LocatedSpan<&'a str>;
 
 // use nom_supreme::error::ErrorTree;
+use ast::Safe;
 
 #[inline]
 pub fn is_upper_alphabetic(chr: char) -> bool {
@@ -85,8 +86,8 @@ fn handle(i: Span) -> ParseResult<ast::Handle> {
   Ok((
     i, 
     ast::Handle {
-      position,
-      name: h_name,
+      position: position.safe(),
+      name: h_name.fragment().to_string(),
       usages: h_usages.clone(),
       h_type
     }
@@ -106,39 +107,39 @@ fn kind_token(i: Span) -> ParseResult<ast::ListenerKind> {
 
 fn state_reference(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
-  name(i).map(|(rest, state_elt)| (rest, ast::Expression::state_reference(position, state_elt.fragment())))
+  name(i).map(|(rest, state_elt)| (rest, ast::Expression::state_reference(position.safe(), state_elt.fragment())))
 }
 
 fn int_literal(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
   let (i, const_int) = digit1(i)?;
-  Ok((i, ast::Expression::int_literal(position, const_int.parse::<i64>().unwrap())))
+  Ok((i, ast::Expression::int_literal(position.safe(), const_int.parse::<i64>().unwrap())))
 }
 
 fn string_literal(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
   let (i, (_, literal, _)) = tuple((char('"'), cut(take_until("\"")), char('"')))(i)?;
-  Ok((i, ast::Expression::string_literal(position, literal.fragment())))
+  Ok((i, ast::Expression::string_literal(position.safe(), literal.fragment())))
 }
 
 fn char_literal(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
   let (i, literal) = delimited(char('\''), cut(take(1usize)), char('\''))(i)?;
-  Ok((i, ast::Expression::char_literal(position, literal.chars().nth(0).unwrap() as u8)))
+  Ok((i, ast::Expression::char_literal(position.safe(), literal.chars().nth(0).unwrap() as u8)))
 
 }
 
 fn tuple_expression(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
   let (i, mut members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression(0)), char(')'))(i)?;
-  Ok((i, ast::Expression::tuple(position, members)))
+  Ok((i, ast::Expression::tuple(position.safe(), members)))
 }
 
 fn function(i: Span) -> ParseResult<ast::Expression> {
   // TODO: multiple arguments
   let (i, position) = position(i)?;
   let (i, (f_name, _, _, _, f_arg, _, _)) = tuple((name, multispace0, char('('), multispace0, expression(0), multispace0, char(')')))(i)?;
-  Ok((i, ast::Expression::function_call(position, f_name.fragment(), f_arg)))
+  Ok((i, ast::Expression::function_call(position.safe(), f_name.fragment(), f_arg)))
 }
 
 // Expression cases
@@ -168,12 +169,12 @@ fn operator(precedence: usize) -> impl Fn(Span) -> ParseResult<ast::Operator> {
   )), |op| op.precedence() > precedence)(i)
 }
 
-fn expression_modifier<'a>(i: Span<'a>, expr: ast::Expression<'a>, precedence: usize) -> ParseResult<'a, ast::Expression<'a>> {
+fn expression_modifier<'a>(i: Span<'a>, expr: ast::Expression, precedence: usize) -> ParseResult<'a, ast::Expression> {
   let test = delimited(char('['), expression(0), char(']'))(i);
   let (i, _) = multispace0(i)?;
   let (i, position) = position(i)?;
   if let Ok((i, value)) = test {
-    Ok((i, ast::Expression::array_lookup(position, expr, value)))
+    Ok((i, ast::Expression::array_lookup(position.safe(), expr, value)))
   } else {
     let test = preceded(char('.'), int_literal)(i);
     if let Ok((i, ast::Expression {
@@ -181,16 +182,16 @@ fn expression_modifier<'a>(i: Span<'a>, expr: ast::Expression<'a>, precedence: u
         info: ast::ExpressionValueEnum::IntLiteral(literal),
         position: _
       }, is_terminated: _, precedence: _ })) = test {
-      Ok((i, ast::Expression::tuple_lookup(position, expr, literal)))
+      Ok((i, ast::Expression::tuple_lookup(position.safe(), expr, literal)))
     } else {
       let op_test = operator(precedence)(i)?;
       let exp_test = preceded(multispace0, expression(op_test.1.precedence()))(op_test.0)?;
-      Ok((exp_test.0, ast::Expression::binary_operator(position, expr, op_test.1, exp_test.1)))   
+      Ok((exp_test.0, ast::Expression::binary_operator(position.safe(), expr, op_test.1, exp_test.1)))   
     }
   }
 }
 
-fn consume_modifiers<'a>(i: Span<'a>, expr: ast::Expression<'a>, precedence: usize) -> ParseResult<'a, ast::Expression<'a>> {
+fn consume_modifiers<'a>(i: Span<'a>, expr: ast::Expression, precedence: usize) -> ParseResult<'a, ast::Expression> {
   let mut r = (i, expr);
   loop {
     // TODO: cloning here isn't really OK .. 
@@ -219,9 +220,9 @@ fn block_expression(i: Span) -> ParseResult<ast::Expression> {
     expressions.push(expr);
   } else {
     let (i, position) = position(i)?;
-    expressions.push(ast::Expression::empty(position));
+    expressions.push(ast::Expression::empty(position.safe()));
   }
-  Ok((i, ast::Expression::block(block_position, expressions)))
+  Ok((i, ast::Expression::block(block_position.safe(), expressions)))
 }
 
 fn expression(precedence: usize) -> impl Fn(Span) -> ParseResult<ast::Expression> {
@@ -249,7 +250,7 @@ fn expression(precedence: usize) -> impl Fn(Span) -> ParseResult<ast::Expression
 fn break_expression(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
   let (i, _) = tag("break")(i)?;
-  Ok((i, ast::Expression::break_expression(position)))
+  Ok((i, ast::Expression::break_expression(position.safe())))
 }
 
 fn terminated_expression(i: Span) -> ParseResult<ast::Expression> {
@@ -270,28 +271,28 @@ fn output_expression(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
   let (i, (output_name, _, _, _, expr)) 
     = tuple((name, multispace0, tag("<-"), multispace0, expression(0)))(i)?;
-  Ok((i, ast::Expression::output(position, output_name.fragment(), expr, false)))
+  Ok((i, ast::Expression::output(position.safe(), output_name.fragment(), expr, false)))
 }
 
 fn output_return_expression(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
   let (i, (output_name, _, _, _, expr)) 
     = tuple((name, multispace0, tag("<!-"), multispace0, expression(0)))(i)?;
-  Ok((i, ast::Expression::output(position, output_name.fragment(), expr, true)))
+  Ok((i, ast::Expression::output(position.safe(), output_name.fragment(), expr, true)))
 }
 
 fn let_expression(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
   let (i, (_, _, var_name, _, _, _, expr))
     = tuple((tag("let"), multispace1, name, multispace0, char('='), multispace0, expression(0)))(i)?;
-  Ok((i, ast::Expression::let_expression(position, var_name.fragment(), expr, false)))
+  Ok((i, ast::Expression::let_expression(position.safe(), var_name.fragment(), expr, false)))
 }
 
 fn update_expression(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
   let (i, (var_name, _, _, _, expr))
     = tuple((name, multispace0, char('='), multispace0, expression(0)))(i)?;
-  Ok((i, ast::Expression::let_expression(position, var_name.fragment(), expr, true)))
+  Ok((i, ast::Expression::let_expression(position.safe(), var_name.fragment(), expr, true)))
 }
 
 fn if_expression(i: Span) -> ParseResult<ast::Expression> {
@@ -301,9 +302,9 @@ fn if_expression(i: Span) -> ParseResult<ast::Expression> {
     opt(tuple((multispace0, tag("else"), multispace0, block_expression)))
   ))(i)?;
   if let Some((_, _, _, if_false)) = else_clause {
-    Ok((i, ast::Expression::if_expression(position, test, if_true, if_false)))
+    Ok((i, ast::Expression::if_expression(position.safe(), test, if_true, if_false)))
   } else {
-    Ok((i, ast::Expression::if_expression(position, test, if_true, ast::Expression::empty(position))))
+    Ok((i, ast::Expression::if_expression(position.safe(), test, if_true, ast::Expression::empty(position.safe()))))
   }
 }
 
@@ -312,7 +313,7 @@ fn while_expression(i: Span) -> ParseResult<ast::Expression> {
   let (i, (_, _, expr, _, block)) = tuple((
     tag("while"), multispace1, cut(expression(0)), multispace0, cut(block_expression)
   ))(i)?;
-  Ok((i, ast::Expression::while_expression(position, expr, block)))
+  Ok((i, ast::Expression::while_expression(position.safe(), expr, block)))
 }
 
 fn listener(i: Span) -> ParseResult<ast::Listener> {
@@ -410,7 +411,7 @@ fn top_levels(i: Span) -> ParseResult<Vec<ast::TopLevel>> {
   separated_list0(multispace1, top_level)(i)
 }
 
-pub fn parse<'a>(i: &'a str) -> ParseResult<Vec<ast::TopLevel<'a>>> {
+pub fn parse<'a>(i: &'a str) -> ParseResult<Vec<ast::TopLevel>> {
   let (input, (result, _)) = tuple((
     delimited(multispace0, top_levels, multispace0),
     eof
@@ -463,15 +464,15 @@ mod tests {
   fn parse_handle() {
     assert_eq!(
       handle(Span::new("foo: reads writes Int;")).unwrap().1,
-      ast::Handle { position: Span::from(""), name: Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
+      ast::Handle { position: ast::SafeSpan{ offset: 0, line: 1 }, name: "foo".to_string(), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
     );
     assert_eq!(
       handle(Span::new("bar: writes String;")).unwrap().1,
-      ast::Handle { position: Span::from(""), name: Span::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::String }
+      ast::Handle { position: ast::SafeSpan{ offset: 0, line: 1 }, name: "bar".to_string(), usages: vec!(ast::Usage::Write), h_type: ast::Type::String }
     );
     assert_eq!(
       handle(Span::new("foo: reads writes Int; bar: writes String;")).unwrap().1,
-      ast::Handle { position: Span::from(""), name: Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
+      ast::Handle { position: ast::SafeSpan{ offset: 0, line: 1 }, name: "foo".to_string(), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }
     )
   }
 
@@ -481,8 +482,8 @@ mod tests {
       handles(Span::new("foo: reads writes Int;
                          bar: writes String;")).unwrap().1,
       vec!(
-        ast::Handle { position: Span::from(""), name: Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
-        ast::Handle { position: unsafe { Span::new_from_raw_offset(48, 2, "", ()) }, name: unsafe { Span::new_from_raw_offset(48, 2, "bar", ()) }, usages: vec!(ast::Usage::Write), h_type: ast::Type::String },
+        ast::Handle { position: ast::SafeSpan{ offset: 0, line: 1 }, name: "foo".to_string(), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
+        ast::Handle { position: ast::SafeSpan{ offset: 48, line: 2 }, name: "bar".to_string(), usages: vec!(ast::Usage::Write), h_type: ast::Type::String },
       )
     )
   }
@@ -538,13 +539,13 @@ mod tests {
   foo.onChange: bar <- far(la);
 }";
 
-  fn test_module_result<'a>(offset: usize, line: u32) -> ast::Module<'a> {
+  fn test_module_result<'a>(offset: usize, line: u32) -> ast::Module {
     ast::Module {
       name: String::from("TestModule"),
       handles: vec!(
         ast::Handle {
-          position: unsafe { Span::new_from_raw_offset(22 + offset, 1 + line, "", ()) }, 
-          name: unsafe { Span::new_from_raw_offset(22 + offset, 1 + line, "foo", ()) }, 
+          position: ast::SafeSpan { offset: 22 + offset, line: 1 + line },
+          name: "foo".to_string(), 
           usages: vec!(ast::Usage::Read, ast::Usage::Write), 
           h_type: ast::Type::Int 
         }

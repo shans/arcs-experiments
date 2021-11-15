@@ -54,7 +54,7 @@ pub fn llvm_type_for_primitive<'ctx>(cg: &CodegenState<'ctx>, primitive_type: &V
   }
 }
 
-impl <'a> Typeable for ast::Module<'a> {
+impl <'a> Typeable for ast::Module {
   fn ir_type<'ctx>(&self, cg: &CodegenState<'ctx>) -> AnyTypeEnum<'ctx> {
     let mut sub_types: Vec<BasicTypeEnum> = Vec::new();
     for handle in &self.handles {
@@ -69,13 +69,13 @@ impl <'a> Typeable for ast::Module<'a> {
   }
 }
 
-impl <'a> Nameable for ast::Module<'a> {
+impl <'a> Nameable for ast::Module {
   fn fn_name(&self) -> String {
     self.name.clone() + "_update"
   }
 }
 
-pub fn codegen<'ctx>(context: &'ctx Context, constructor: &mut dyn CodegenStateConstructor<'ctx>, module: &'ctx ast::Module<'ctx>) -> CodegenResult<Vec<Module<'ctx>>> {
+pub fn codegen<'ctx>(context: &'ctx Context, constructor: &mut dyn CodegenStateConstructor<'ctx>, module: &'ctx ast::Module) -> CodegenResult<Vec<Module<'ctx>>> {
   let mut result = Vec::new();
   let mut cg = constructor.construct(context, &module.name);
   module_codegen(&mut cg, module)?;
@@ -88,7 +88,7 @@ pub fn codegen<'ctx>(context: &'ctx Context, constructor: &mut dyn CodegenStateC
   Ok(result)
 }
 
-pub fn module_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Module<'ctx>) -> CodegenStatus {
+pub fn module_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Module) -> CodegenStatus {
   for listener in module.listeners.iter() {
     listener_codegen(cg, module, listener)?;
   }
@@ -98,7 +98,7 @@ pub fn module_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Modu
   examples_codegen(cg, module)
 }
 
-fn module_update_function<'ctx, 'a>(cg: &CodegenState<'ctx>, module: &ast::Module<'a>) -> CodegenStatus {
+fn module_update_function<'ctx, 'a>(cg: &CodegenState<'ctx>, module: &ast::Module) -> CodegenStatus {
   // Compute a trigger mask - we only need to trigger when a listener is installed on a handle
   // TODO: we don't actually use this..
   let mut trigger_mask: u64 = 0;
@@ -140,7 +140,7 @@ fn module_update_function<'ctx, 'a>(cg: &CodegenState<'ctx>, module: &ast::Modul
     update_ptr.clear_update_pointer(cg)?;
 
     for listener in module.listeners.iter() {
-      if listener.trigger == *handle.name.fragment() {
+      if listener.trigger == *handle.name {
         let function_name = (module, listener).fn_name();
         let function = cg.module.get_function(&function_name).ok_or(CodegenError::FunctionMissing)?;
         cg.builder.build_call(function, &[state_ptr.into()], "_");
@@ -157,7 +157,7 @@ fn module_update_function<'ctx, 'a>(cg: &CodegenState<'ctx>, module: &ast::Modul
 }
 
 
-impl <'a> Nameable for (&ast::Module<'a>, &ast::Listener<'a>) {
+impl <'a> Nameable for (&ast::Module, &ast::Listener) {
   fn fn_name(&self) -> String {
     self.0.name.clone() + "__" + self.1.kind.to_string() + "__" + &self.1.trigger
   }
@@ -167,13 +167,13 @@ fn ir_listener_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module) -> AnyT
     AnyTypeEnum::FunctionType(cg.context.void_type().fn_type(&[module.ir_type(cg).into_struct_type().ptr_type(AddressSpace::Generic).into()], false))
 }
 
-impl <'a> Typeable for (&ast::Module<'a>, &ast::Listener<'a>) {
+impl <'a> Typeable for (&ast::Module, &ast::Listener) {
   fn ir_type<'ctx>(&self, cg: &CodegenState<'ctx>) -> AnyTypeEnum<'ctx> {
     ir_listener_type(cg, self.0)
   }
 }
 
-fn listener_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module<'ctx>, listener: &'ctx ast::Listener<'ctx>) -> CodegenStatus {
+fn listener_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, listener: &'ctx ast::Listener) -> CodegenStatus {
   let function_type = (module, listener).ir_type(cg).into_function_type();
   let listener_name = (module, listener).fn_name();
   let function = cg.module.add_function(&listener_name, function_type, None);
@@ -188,7 +188,7 @@ fn state_alloca_for_module_function<'ctx>(cg: &CodegenState<'ctx>, module: &ast:
   state_alloca
 }
 
-fn listener_body_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module<'ctx>, implementation: &'ctx ast::ExpressionValue<'ctx>, function: FunctionValue<'ctx>) -> CodegenStatus {
+fn listener_body_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Module, implementation: &'ctx ast::ExpressionValue, function: FunctionValue<'ctx>) -> CodegenStatus {
   let entry_block = cg.context.append_basic_block(function, "entry");
   cg.builder.position_at_end(entry_block);
   let state_alloca = state_alloca_for_module_function(cg, module, function);
@@ -337,7 +337,7 @@ pub fn get_printf<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
 
 fn maybe_copy_back_to_module<'ctx, 'a>(
   cg: &CodegenState<'ctx>, 
-  module: &ast::Module<'a>,
+  module: &ast::Module,
   state_ptr: PointerValue<'ctx>, 
   submodule_info: &ast::ModuleInfo, 
   submodule_state_ptr: PointerValue<'ctx>, 
@@ -355,7 +355,7 @@ fn maybe_copy_back_to_module<'ctx, 'a>(
 
   cg.builder.position_at_end(do_copy);
 
-  let src_name = submodule_info.module.handles[index].name.fragment();
+  let src_name = &submodule_info.module.handles[index].name;
   let src_ptr = cg.update_ptr_for_field(&submodule_info.module, submodule_state_ptr, src_name, UpdatePtrPurpose::ReadWithoutClearing)?;
 
   let dest_name = &submodule_info.handle_map.get(&src_name.to_string()).unwrap();
@@ -395,27 +395,27 @@ mod tests {
   use super::super::super::ast::Expr;
   use super::super::super::parser;
 
-  pub fn test_module<'a>() -> ast::Module<'a> {
+  pub fn test_module<'a>() -> ast::Module {
     ast::Module {
       name: String::from("TestModule"),
-      handles: vec!(ast::Handle { position: ast::Span::from(""), name: ast::Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
-                    ast::Handle { position: ast::Span::from(""), name: ast::Span::from("far"), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
-                    ast::Handle { position: ast::Span::from(""), name: ast::Span::from("bar"), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
+      handles: vec!(ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "foo".to_string(), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
+                    ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "far".to_string(), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
+                    ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "bar".to_string(), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
                   ),
       listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: 
-        ast::Expression::output(ast::Span::new(""), "bar", ast::Expression::state_reference(ast::Span::new(""), "far"), false).value,
+        ast::Expression::output(ast::SafeSpan { offset: 0, line: 1 }, "bar", ast::Expression::state_reference(ast::SafeSpan { offset: 0, line: 1 }, "far"), false).value,
       }),
       submodules: Vec::new(),
       examples: ast::Examples { examples: Vec::new() },
     }
   }
 
-  fn invalid_module<'a>() -> ast::Module<'a> {
+  fn invalid_module<'a>() -> ast::Module {
      ast::Module {
       name: String::from("InvalidModule"),
-      handles: vec!(ast::Handle { position: ast::Span::from(""), name: ast::Span::from("foo"), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
+      handles: vec!(ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "foo".to_string(), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
       listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, implementation:
-        ast::Expression::output(ast::Span::new(""), "foo", ast::Expression::state_reference(ast::Span::new(""), "foo"), false).value,
+        ast::Expression::output(ast::SafeSpan { offset: 0, line: 1 }, "foo", ast::Expression::state_reference(ast::SafeSpan { offset: 0, line: 1 }, "foo"), false).value,
       }),
       submodules: Vec::new(),
       examples: ast::Examples { examples: Vec::new() },

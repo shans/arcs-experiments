@@ -10,25 +10,24 @@ use paste::paste;
 use std::ptr;
 
 fn ee_for_string<F>(module: &str, func: F) -> CodegenStatus
-    where F: FnOnce(ExecutionEngine) -> () {
+    where F: FnOnce(ExecutionEngine, &Module) -> () {
   let context = Context::create();
   let (_, ast) = parser::parse(module).unwrap();
   
   if ast::modules(&ast).len() == 1 && ast::graphs(&ast).len() == 0 {
     let mut jit_info = JitInfo::new();
     let modules = codegen(&context, &mut jit_info, &ast::modules(&ast)[0])?;
-    //modules[0].print_to_stderr();
     let ee = jit_info.execution_engine.unwrap();
-    func(ee);
+    func(ee, &modules[0]);
   } else {
     let mut graph = graph_builder::make_graph(ast::graphs(&ast));
     graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
     let modules = ast::modules(&ast);
-    let main = graph_to_module::graph_to_module(&graph, &modules, "Main").unwrap();
+    let main = graph_to_module::graph_to_module(graph, modules, "Main").unwrap();
     let mut jit_info = JitInfo::new();
-    codegen(&context, &mut jit_info, &main)?;
+    let cg_modules = codegen(&context, &mut jit_info, &main)?;
     let ee = jit_info.execution_engine.unwrap();
-    func(ee);
+    func(ee, &cg_modules[0]);
   }
   Ok(())
 }
@@ -52,7 +51,7 @@ impl MemRegion {
 
 #[macro_export]
 macro_rules! state_struct {
-  ( $name:ident, $($field_name:ident:$field_type:ty),* $(| $($module_field:ident:$module_type:ty),*)? ) => {
+  ( $name:ident, $($field_name:ident: $field_type:ty),* $(| $($module_field:ident: $module_type:ty),*)? ) => {
     paste! {
       #[derive(Debug)]
       #[repr(C)]
@@ -69,28 +68,37 @@ macro_rules! state_struct {
 
       type [<$name Func>] = unsafe extern "C" fn(*mut [<$name State>]) -> ();
       type [<$name PrepFunc>] = unsafe extern "C" fn() -> *mut [<$name State>];
+      type [<$name PrepVectorFunc>] = unsafe extern "C" fn(u64) -> *mut [<$name State>];
       type [<$name CheckFunc>] = unsafe extern "C" fn(*mut [<$name State>]) -> u64;
+      type [<$name CheckVectorFunc>] = unsafe extern "C" fn(u64, *mut [<$name State>]) -> u64;
     }
   }
 }
 
+type u64Func = unsafe extern "C" fn() -> u64;
+
 #[macro_export]
 macro_rules! check_examples {
-  ($name:ident, $defn:ident, $count:expr) => {
+  ($name:ident, $defn:ident) => {
     paste! {
       #[test]
       fn [<check_examples_for_ $name>]() -> CodegenStatus {
-        ee_for_string($defn, |ee: ExecutionEngine| {
+        ee_for_string($defn, |ee: ExecutionEngine, _m| {
           unsafe {
-            for i in (0..$count) {
-              let prep_prefix = concat!(stringify!($name), "__example_prep_");
-              let check_prefix = concat!(stringify!($name), "__example_check_");
-              let prep = prep_prefix.to_string() + &i.to_string();
-              let check = check_prefix.to_string() + &i.to_string();
+            //_m.print_to_stderr();
+            let count_func = concat!(stringify!($name), "__get_example_count");
+            let count_function: JitFunction<u64Func> = ee.get_function(count_func).unwrap();
+            let count = count_function.call();
+
+            let prep_func = concat!(stringify!($name), "__get_example_prep");
+            let prep_function: JitFunction<[<$name PrepVectorFunc>]> = ee.get_function(prep_func).unwrap();
+
+            let check_func = concat!(stringify!($name), "__get_example_check");
+            let check_function: JitFunction<[<$name CheckVectorFunc>]> = ee.get_function(check_func).unwrap();
+            for i in (0..count) {
               let update = concat!(stringify!($name), "_update");
 
-              let function: JitFunction<[<$name PrepFunc>]> = ee.get_function(&prep).unwrap();
-              let state = function.call();
+              let state = prep_function.call(i);
 
               let update: JitFunction<[<$name Func>]> = ee.get_function(update).unwrap();
               while (&*state).bitfield > 0 {
@@ -98,8 +106,7 @@ macro_rules! check_examples {
               }
 
               let final_state = format!("{:#?}", &*state);
-              let check: JitFunction<[<$name CheckFunc>]> = ee.get_function(&check).unwrap();
-              let r = check.call(state);
+              let r = check_function.call(i, state);
               if (r != 0) {
                 println!("Unexpected result for example {}. Output of this example:\n {}\n. Error bitfield: {}", i, final_state, r);
               }
@@ -158,7 +165,7 @@ state_struct!(MultiModule, foo: u64, bar: u64, h0: u64 | my_module:NestedModuleS
 
 #[test]
 fn jit_multi_module_codegen_runs() -> CodegenStatus {
-  ee_for_string(MULTI_MODULE_STRING, |ee: ExecutionEngine| {
+  ee_for_string(MULTI_MODULE_STRING, |ee: ExecutionEngine, _| {
     unsafe {
       let function: JitFunction<MultiModuleFunc> = ee.get_function("Main_update").unwrap();
       let mut state = MultiModuleState { foo: 0, foo_upd: 10, h0: 0, h0_upd: 0, bar: 0, bar_upd: 0, bitfield: 0x1, 
@@ -208,7 +215,7 @@ state_struct!(ModuleWithNew, bar: MemRegion, foo: u64);
 
 #[test]
 fn jit_new_memregion_codegen_runs() -> CodegenStatus {
-  ee_for_string(NEW_MEMREGION_TEST_STRING, |ee: ExecutionEngine| {
+  ee_for_string(NEW_MEMREGION_TEST_STRING, |ee: ExecutionEngine, _| {
     unsafe {
       let function: JitFunction<ModuleWithNewFunc> = ee.get_function("ModuleWithNew_update").unwrap();
       let mut state = ModuleWithNewState { bar: MemRegion::empty(), bar_upd: MemRegion::empty(), foo: 0, foo_upd: 10, bitfield: 0x2 };
@@ -246,7 +253,7 @@ state_struct!(CopyMemRegionMain, size_in: u64, size_out: u64, h0: MemRegion | wr
 
 #[test]
 fn jit_copy_memregion_codegen_runs() -> CodegenStatus {
-  ee_for_string(COPY_MEMREGION_TEST_STRING, |ee: ExecutionEngine| {
+  ee_for_string(COPY_MEMREGION_TEST_STRING, |ee: ExecutionEngine, _| {
     unsafe {
       let function: JitFunction<CopyMemRegionMainFunc> = ee.get_function("Main_update").unwrap();  
       let mut state = CopyMemRegionMainState {
@@ -291,7 +298,7 @@ state_struct!(StringTestMain, inp: u64, out: u8, h0: MemRegion | writer: CreateS
 
 #[test]
 fn jit_create_string_codegen_runs() -> CodegenStatus {
-  ee_for_string(STRING_TEST_STRING, |ee: ExecutionEngine| {
+  ee_for_string(STRING_TEST_STRING, |ee: ExecutionEngine, _| {
     unsafe {
       let function: JitFunction<StringTestMainFunc> = ee.get_function("Main_update").unwrap();
       let mut state = StringTestMainState {
@@ -335,7 +342,7 @@ state_struct!(TupleMain, inp: u64, out1: u64, out2: MemRegion, h0: *const (u64, 
 
 #[test]
 fn jit_create_tuple_codegen_runs() -> CodegenStatus {
-  ee_for_string(TUPLE_TEST_STRING, |ee: ExecutionEngine| {
+  ee_for_string(TUPLE_TEST_STRING, |ee: ExecutionEngine, _| {
     unsafe {
       let function: JitFunction<TupleMainFunc> = ee.get_function("Main_update").unwrap();
       let mut state = TupleMainState {
@@ -397,11 +404,11 @@ module SyntaxTest {
 
 state_struct!(SyntaxTest, inp: *const (MemRegion, u64), out: *const(MemRegion, u64), result: u64, error: u64);
 
-check_examples!(SyntaxTest, SYNTAX_TEST_STRING, 8);
+check_examples!(SyntaxTest, SYNTAX_TEST_STRING);
 
 #[test]
 fn jit_syntax_test_codegen_runs() -> CodegenStatus {
-  ee_for_string(SYNTAX_TEST_STRING, |ee: ExecutionEngine| {
+  ee_for_string(SYNTAX_TEST_STRING, |ee: ExecutionEngine, _| {
     unsafe {
       let function: JitFunction<SyntaxTestFunc> = ee.get_function("SyntaxTest_update").unwrap();
       let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
@@ -445,7 +452,7 @@ state_struct!(WhileTest, len: u64, string: MemRegion, result: u64);
 
 #[test]
 fn jit_while_test_codegen_runs() -> CodegenStatus {
-  ee_for_string(WHILE_TEST_STRING, |ee: ExecutionEngine| {
+  ee_for_string(WHILE_TEST_STRING, |ee: ExecutionEngine, _| {
     unsafe {
       let function: JitFunction<WhileTestFunc> = ee.get_function("WhileTest_update").unwrap();
       let mut state = WhileTestState { len: 0, len_upd: 5, string: MemRegion::from_str("42360 "), string_upd: MemRegion::empty(), result: 0, result_upd: 0, bitfield: 0x1 };
@@ -474,7 +481,7 @@ state_struct!(ExampleTest, a: u64, b: u64, c: u64);
 
 #[test]
 fn compile_and_run_examples() -> CodegenStatus {
-  ee_for_string(EXAMPLES_TEST_STRING, |ee: ExecutionEngine| {
+  ee_for_string(EXAMPLES_TEST_STRING, |ee: ExecutionEngine, _| {
     unsafe {
       let function: JitFunction<ExampleTestPrepFunc> = ee.get_function("ExampleTest__example_prep_0").unwrap();
       let state = function.call();
@@ -513,5 +520,3 @@ fn compile_and_run_examples() -> CodegenStatus {
   })
 }
 
-// The second example for ExampleTest is purposefully incorrect for testing.
-check_examples!(ExampleTest, EXAMPLES_TEST_STRING, 1);
