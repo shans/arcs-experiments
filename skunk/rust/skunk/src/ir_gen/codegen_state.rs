@@ -3,8 +3,10 @@ use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::passes::{PassManager, PassManagerBuilder};
-use inkwell::values::{FunctionValue, IntValue};
+use inkwell::values::{FunctionValue, IntValue, PointerValue};
 use inkwell::targets::{TargetMachine, TargetTriple};
+use inkwell::types::PointerType;
+use inkwell::AddressSpace;
 
 use std::collections::HashMap;
 use super::state_values::*;
@@ -36,6 +38,7 @@ pub struct CodegenState<'ctx> {
   pub locals: HashMap<String, StatePointer<'ctx>>,
   pub break_target: Vec<BasicBlock<'ctx>>,
   pub considering: Option<&'ctx ExpressionValue>,
+  pub registered_strings: HashMap<String, PointerValue<'ctx>>
 }
 
 impl <'ctx> CodegenState<'ctx> {
@@ -48,12 +51,16 @@ impl <'ctx> CodegenState<'ctx> {
     let pass_manager_builder = PassManagerBuilder::create();
     let function_pass_manager = PassManager::create(&module);
     pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-    CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None }
+    CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None, registered_strings: HashMap::new() }
   }
 
   
   pub fn uint_const(&self, value: u64) -> IntValue<'ctx> {
     self.context.i64_type().const_int(value, false)
+  }
+
+  pub fn uint32_const(&self, value: u32) -> IntValue<'ctx> {
+    self.context.i32_type().const_int(value as u64, false)
   }
 
   pub fn add_local(&mut self, name: &str, value: StateValue<'ctx>) -> CodegenStatus {
@@ -75,6 +82,18 @@ impl <'ctx> CodegenState<'ctx> {
     } else {
       None
     }
+  }
+
+  pub fn char_ptr_type(&self) -> PointerType<'ctx> {
+    self.context.i8_type().ptr_type(AddressSpace::Generic)
+  }
+
+  pub fn global_string(&mut self, value: &str) -> PointerValue<'ctx> {
+    self.registered_strings.get(value).map(|rf| *rf).or_else(|| {
+      let ptr = self.builder.build_global_string_ptr(value, "global_string").as_pointer_value();
+      self.registered_strings.insert(value.to_string(), ptr);
+      Some(ptr)
+    }).unwrap()
   }
 }
 
@@ -99,18 +118,6 @@ pub mod tests {
   use inkwell::execution_engine::{ExecutionEngine};
   use inkwell::OptimizationLevel;
 
-  impl <'ctx>CodegenState<'ctx> {
-    pub fn new_for_jit(context: &'ctx Context, name: &str) -> (CodegenState<'ctx>, ExecutionEngine<'ctx>) {
-      let module = context.create_module(name);
-      let execution_engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
-      let builder = context.create_builder();
-      let pass_manager_builder = PassManagerBuilder::create();
-      let function_pass_manager = PassManager::create(&module);
-      pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-      (CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None }, execution_engine)
-    }
-  } 
-
   pub struct JitInfo<'ctx> {
     pub execution_engine: Option<ExecutionEngine<'ctx>>,
   }
@@ -129,14 +136,14 @@ pub mod tests {
           self.execution_engine = Some(module.create_jit_execution_engine(OptimizationLevel::None).unwrap());
         }
         Some(execution_engine) => {
-          execution_engine.add_module(&module);
+          execution_engine.add_module(&module).unwrap();
         }
       }
       let builder = context.create_builder();
       let pass_manager_builder = PassManagerBuilder::create();
       let function_pass_manager = PassManager::create(&module);
       pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-      CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None }
+      CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None, registered_strings: HashMap::new() }
     }
   }
 }

@@ -14,10 +14,13 @@ use super::state_values::*;
 
 mod expression_codegen;
 mod examples_codegen;
+mod debug_codegen;
+mod c_functions;
 
 pub use expression_codegen::{expression_codegen, expression_logical_and};
 use examples_codegen::examples_codegen;
-
+pub use debug_codegen::*;
+pub use c_functions::*;
 
 trait Typeable {
   fn ir_type<'ctx>(&self, cg: &CodegenState<'ctx>) -> AnyTypeEnum<'ctx>;
@@ -94,8 +97,13 @@ pub fn module_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Modu
   }
 
   module_update_function(cg, module)?;
+
+  // TODO: Gate producing this on test or debug modes
+  debug_codegen(cg, module)?;
+
   // TODO: Gate producing this on test compilation mode
   examples_codegen(cg, module)
+
 }
 
 fn module_update_function<'ctx, 'a>(cg: &CodegenState<'ctx>, module: &ast::Module) -> CodegenStatus {
@@ -277,62 +285,17 @@ fn invoke_submodule<'ctx>(cg: &CodegenState<'ctx>, submodule: &ast::Module, subm
   Ok(())
 }
 
-pub fn malloc<'ctx>(cg: &CodegenState<'ctx>, size: BasicValueEnum<'ctx>, name: &str) -> BasicValueEnum<'ctx> {
-  let malloc = get_malloc(cg);
-  cg.builder.build_call(malloc, &[size], name).try_as_basic_value().left().unwrap()
-}
-
-fn get_malloc<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
-  cg.module.get_function("malloc").or_else(|| {
-    let function_type = cg.context.i8_type().ptr_type(AddressSpace::Generic).fn_type(&[cg.context.i64_type().into()], false);
-    Some(cg.module.add_function("malloc", function_type, None))
-  }).unwrap()
-}
-
-pub fn free<'ctx>(cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>) {
-  let free = get_free(cg);
-  cg.builder.build_call(free, &[ptr.into()], "");
-}
-
-fn get_free<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
-  cg.module.get_function("free").or_else(|| {
-    let function_type = cg.context.void_type().fn_type(&[cg.context.i8_type().ptr_type(AddressSpace::Generic).into()], false);
-    Some(cg.module.add_function("free", function_type, None))
-  }).unwrap()
-}
-
-pub fn memcmp<'ctx>(cg: &CodegenState<'ctx>, lhs: PointerValue<'ctx>, rhs: PointerValue<'ctx>, size: IntValue<'ctx>) -> IntValue<'ctx> {
-  let memcmp = get_memcmp(cg);
-  cg.builder.build_call(memcmp, &[lhs.into(), rhs.into(), size.into()], "memcmp_result").try_as_basic_value().left().unwrap().into_int_value()
-}
-
-fn get_memcmp<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
-  cg.module.get_function("memcmp").or_else(|| {
-    let function_type = cg.context.i64_type().fn_type(&[
-      cg.context.i8_type().ptr_type(AddressSpace::Generic).into(), 
-      cg.context.i8_type().ptr_type(AddressSpace::Generic).into(), 
-      cg.context.i64_type().into()
-    ], false);
-    Some(cg.module.add_function("memcmp", function_type, None))
-  }).unwrap()
-}
-
 pub fn debug_str<'ctx>(cg: &CodegenState<'ctx>, s: &str) {
   let printf = get_printf(cg);
   let sk_str = cg.builder.build_global_string_ptr(&("skunk> ".to_string() + s), "sk_str").as_pointer_value();
   cg.builder.build_call(printf, &[sk_str.into()], "_");
 }
 
-pub fn debug<'ctx>(cg: &CodegenState<'ctx>, s: StateValue<'ctx>) -> CodegenStatus {
-  let printf = get_printf(cg);
-  s.debug(cg, printf)
-}
-
-pub fn get_printf<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
-  cg.module.get_function("printf").or_else(|| {
-    let function_type = cg.context.i32_type().fn_type(&[cg.context.i8_type().ptr_type(AddressSpace::Generic).into()], true);
-    Some(cg.module.add_function("printf", function_type, None))
-  }).unwrap()
+pub fn debug<'ctx>(cg: &mut CodegenState<'ctx>, s: StateValue<'ctx>) -> CodegenStatus {
+  let mut ds = DebugState::new(cg, false);
+  s.debug(cg, &mut ds)?;
+  ds.print_to_console(cg);
+  Ok(())
 }
 
 fn maybe_copy_back_to_module<'ctx, 'a>(

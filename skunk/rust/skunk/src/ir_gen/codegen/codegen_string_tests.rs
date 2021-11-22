@@ -105,11 +105,7 @@ macro_rules! check_examples {
                 update.call(state);
               }
 
-              let final_state = format!("{:#?}", &*state);
               let r = check_function.call(i, state);
-              if (r != 0) {
-                println!("Unexpected result for example {}. Output of this example:\n {}\n. Error bitfield: {}", i, final_state, r);
-              }
               assert_eq!(r, 0);
             }
           }
@@ -408,8 +404,9 @@ check_examples!(SyntaxTest, SYNTAX_TEST_STRING);
 
 #[test]
 fn jit_syntax_test_codegen_runs() -> CodegenStatus {
-  ee_for_string(SYNTAX_TEST_STRING, |ee: ExecutionEngine, _| {
+  ee_for_string(SYNTAX_TEST_STRING, |ee: ExecutionEngine, _m| {
     unsafe {
+      //_m.print_to_stderr();
       let function: JitFunction<SyntaxTestFunc> = ee.get_function("SyntaxTest_update").unwrap();
       let mut state = SyntaxTestState { inp: ptr::null(), inp_upd: &(MemRegion::from_str("Delicious boots"), 15), out: ptr::null(), out_upd: ptr::null(), result: 0, result_upd: 0, error: 0, error_upd: 0, bitfield: 0x1 };
       function.call(&mut state);

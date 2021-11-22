@@ -139,7 +139,8 @@ pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Modul
       match name.as_str() {
         "new" => {
           let size = value.into_int_value()?;
-          let raw_location = malloc(cg, size.into(), "mem_region_location").into_pointer_value();
+          let size32 = cg.builder.build_int_cast(size, cg.context.i32_type(), "size32");
+          let raw_location = malloc(cg, size32.into(), "mem_region_location").into_pointer_value();
           Ok(StateValue::new_dynamic_mem_region_of_type(raw_location, size, vec!(TypePrimitive::MemRegion)))
         }
         "size" => {

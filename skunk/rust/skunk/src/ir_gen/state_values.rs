@@ -223,7 +223,7 @@ impl <'ctx> StateValue<'ctx> {
   pub fn new_tuple(cg: &CodegenState<'ctx>, tuple_type: Vec<TypePrimitive>) -> CodegenResult<Self> {
     if let TypePrimitive::PointerTo(members) = &tuple_type[0] {
       let tuple_size = type_size(&members);
-      let tuple_ptr = super::malloc(cg, cg.uint_const(tuple_size).into(), "tuple_memory").into_pointer_value();
+      let tuple_ptr = super::malloc(cg, cg.uint32_const(tuple_size as u32).into(), "tuple_memory").into_pointer_value();
       let tuple_llvm_type = super::llvm_type_for_primitive(cg, &tuple_type);
       let typed_tuple_ptr = cg.builder.build_bitcast(tuple_ptr, tuple_llvm_type, "ptr_as_struct_ptr").into_pointer_value();
       Ok(StateValue::new_static_mem_region_of_type(typed_tuple_ptr, tuple_type))
@@ -293,34 +293,45 @@ impl <'ctx> StateValue<'ctx> {
     
   }
 
-  pub fn debug(&self,cg: &CodegenState<'ctx>, printf: FunctionValue<'ctx>) -> CodegenStatus{
+  pub fn debug(&self, cg: &mut CodegenState<'ctx>, printer: &mut dyn Printer<'ctx>) -> CodegenStatus {
     match self.value {
       ValueParts::SingleWordPrimitive(v) => {
         let value_type = self.only_value_type()?;
         match value_type {
           TypePrimitive::Int => {
-            let fmt = cg.builder.build_global_string_ptr("[Int %ld]\n", "fmt").as_pointer_value();
-            cg.builder.build_call(printf, &[fmt.into(), v], "_");
-            Ok(())
+            printer.printf(cg, "[Int %ld]", &[v])
           }
           TypePrimitive::Bool => {
-            let fmt = cg.builder.build_global_string_ptr("[Bool %d]\n", "fmt").as_pointer_value();
-            cg.builder.build_call(printf, &[fmt.into(), v], "_");
-            Ok(())
+            printer.printf(cg, "[Bool %d]", &[v])
+          }
+          TypePrimitive::Char => {
+            printer.printf(cg, "[Char %c]", &[v])
           }
           _ => todo!("Implement debug for {:?}", value_type)
         }
       }
       ValueParts::DynamicMemRegion(data, size) => {
         // TODO: this is only correct if an array of Char
-        let fmt = cg.builder.build_global_string_ptr("[DynString %.*s]\n", "fmt").as_pointer_value();
-        cg.builder.build_call(printf, &[fmt.into(), size.into(), data.into()], "_");
-        Ok(())
+        let size32 = cg.builder.build_int_cast(size, cg.context.i32_type(), "size32");
+        printer.printf(cg, "[DynString %.*s]", &[size32.into(), data.into()])
       }
       ValueParts::StaticMemRegion(data) => {
-        let fmt = cg.builder.build_global_string_ptr("[Static TODO]\n", "fmt").as_pointer_value();
-        cg.builder.build_call(printf, &[fmt.into()], "_");
-        Ok(())
+        if let TypePrimitive::PointerTo(type_list) = self.only_value_type()? {
+          print_if_not_null(cg, printer, data, 
+            &|cg, printer| printer.printf(cg, "[NULL_PTR]", &[]),
+            &|cg, printer| {
+              printer.open_bracket(cg, "(")?;
+              for type_idx in 0..type_list.len() {
+                let value = self.get_tuple_index(cg, type_idx as u32)?;
+                value.debug(cg, printer)?;
+                printer.sep(cg, ",")?;
+              }
+              printer.close_bracket(cg, ")")
+            }
+           )
+        } else {
+          todo!("Implement debug for static mem region which is not a PointerTo");
+        }
       }
       _ => todo!("Implement debug for {:?} {:?}", self.value, self.value_type)
     }
@@ -486,12 +497,25 @@ impl <'ctx> StateValue<'ctx> {
     self.apply_int_predicate(cg, IntPredicate::SGE, other)
   }
 
+  fn bitsize_adjusted(cg: &CodegenState<'ctx>, lhs: IntValue<'ctx>, rhs: IntValue<'ctx>) -> (IntValue<'ctx>, IntValue<'ctx>) {
+    let lhs_bitsize = lhs.get_type().get_bit_width();
+    let rhs_bitsize = rhs.get_type().get_bit_width();
+    if lhs_bitsize > rhs_bitsize {
+      (lhs, cg.builder.build_int_cast(rhs, lhs.get_type(), "sext_rhs"))
+    } else if rhs_bitsize > lhs_bitsize {
+      (cg.builder.build_int_cast(lhs, rhs.get_type(), "sext_lhs"), rhs)
+    } else {
+      (lhs, rhs)
+    }
+  }
+
   fn apply_int_predicate(&self, cg: &CodegenState<'ctx>, predicate: IntPredicate, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
     // TODO: compound type equality
     let value_type = self.only_value_type()?;
     match value_type {
       TypePrimitive::Char | TypePrimitive::Int | TypePrimitive::Bool => {
-        let result = cg.builder.build_int_compare(predicate, self.into_int_value()?, other.into_int_value()?, "eq");
+        let (lhs, rhs) = StateValue::bitsize_adjusted(cg, self.into_int_value()?, other.into_int_value()?);
+        let result = cg.builder.build_int_compare(predicate, lhs, rhs, "eq");
         Ok(StateValue::new_bool(result))
       }
       _ => todo!("IntPredicate for {:?}", value_type)
@@ -505,28 +529,12 @@ impl <'ctx> StateValue<'ctx> {
   }
 
   pub fn add(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
-    let mut lhs = self.into_int_value()?;
-    let mut rhs = other.into_int_value()?;
-    let lhs_bitsize = self.llvm_type().into_int_type().get_bit_width();
-    let rhs_bitsize = other.llvm_type().into_int_type().get_bit_width();
-    if lhs_bitsize > rhs_bitsize {
-      rhs = cg.builder.build_int_s_extend(rhs, self.llvm_type().into_int_type(), "sext_rhs");
-    } else if rhs_bitsize > lhs_bitsize {
-      lhs = cg.builder.build_int_s_extend(lhs, other.llvm_type().into_int_type(), "sext_lhs");
-    }
+    let (lhs, rhs) = StateValue::bitsize_adjusted(cg, self.into_int_value()?, other.into_int_value()?);
     Ok(StateValue::new_int(cg.builder.build_int_add(lhs, rhs, "add")))
   }
 
   pub fn subtract(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
-    let mut lhs = self.into_int_value()?;
-    let mut rhs = other.into_int_value()?;
-    let lhs_bitsize = self.llvm_type().into_int_type().get_bit_width();
-    let rhs_bitsize = other.llvm_type().into_int_type().get_bit_width();
-    if lhs_bitsize > rhs_bitsize {
-      rhs = cg.builder.build_int_s_extend(rhs, self.llvm_type().into_int_type(), "sext_rhs");
-    } else if rhs_bitsize > lhs_bitsize {
-      lhs = cg.builder.build_int_s_extend(lhs, other.llvm_type().into_int_type(), "sext_lhs");
-    }
+    let (lhs, rhs) = StateValue::bitsize_adjusted(cg, self.into_int_value()?, other.into_int_value()?);
     Ok(StateValue::new_int(cg.builder.build_int_sub(lhs, rhs, "subtract")))
   }
 }
