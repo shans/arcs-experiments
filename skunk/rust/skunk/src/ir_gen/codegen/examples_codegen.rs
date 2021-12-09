@@ -21,6 +21,8 @@ pub fn examples_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Mo
   if num_examples == 0 {
     return Ok(());
   }
+  // generate "prep" functions - which create a state pointer and set up initial example state
+  // and "check" functions - which confirm that the final state matches requirements, then clean up the pointer.
   let mut prep_ptr_values = Vec::new();
   let mut check_ptr_values = Vec::new();
   for (idx, example) in module.examples.examples.iter().enumerate() {
@@ -32,6 +34,8 @@ pub fn examples_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Mo
     let check_ptr = check_value.as_global_value().as_pointer_value();
     check_ptr_values.push(check_ptr);
   }
+
+  // Create a count global to store the number of examples, and an accessor function ("<module>__get_example_count")
   let example_count = cg.module.add_global(cg.context.i64_type(), None, &(module.name.clone() + "__example_count"));
   example_count.set_initializer(&cg.uint_const(num_examples as u64));
   let example_count_fn = cg.module.add_function(&(module.name.clone() + "__get_example_count"), cg.context.i64_type().fn_type(&[], false), None);
@@ -39,6 +43,7 @@ pub fn examples_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Mo
   cg.builder.position_at_end(entry_block);
   cg.builder.build_return(Some(&cg.uint_const(num_examples as u64)));
 
+  // create a vector of prep functions
   let example_prep_type = prep_ptr_values[0].get_type();
   let example_prep_array_type = example_prep_type.array_type(num_examples as u32);
   let example_prep_global = cg.module.add_global(example_prep_array_type, None, &(module.name.clone() + "__example_prep_vector"));
@@ -47,6 +52,7 @@ pub fn examples_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Mo
   let module_type = module.ir_type(cg).into_struct_type();
   let module_ptr_type = module_type.ptr_type(AddressSpace::Generic);
 
+  // create a prep function accessor ("<module>__get_example_prep"). This looks up the prep vector by index.
   let example_prep_fn = cg.module.add_function(&(module.name.clone() + "__get_example_prep"), module_ptr_type.fn_type(&[cg.context.i64_type().into()], false), None);
   let entry_block = cg.context.append_basic_block(example_prep_fn, "entry");
   cg.builder.position_at_end(entry_block);
@@ -56,11 +62,13 @@ pub fn examples_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Mo
   let return_val = cg.builder.build_call(callable, &[], "return_val").try_as_basic_value().left().unwrap();
   cg.builder.build_return(Some(&return_val));
 
+  // create a vector of check functions
   let example_check_type = check_ptr_values[0].get_type();
   let example_check_array_type = example_check_type.array_type(num_examples as u32);
   let example_check_global = cg.module.add_global(example_check_array_type, None, &(module.name.clone() + "__example_check_vector"));
   example_check_global.set_initializer(&example_check_type.const_array(&check_ptr_values)); 
 
+  // create a check function accessor ("<module>__get_example_check"). This looks up the check vector by index.
   let example_check_fn = cg.module.add_function(&(module.name.clone() + "__get_example_check"), cg.context.i64_type().fn_type(&[cg.context.i64_type().into(), module_ptr_type.into()], false), None);
   let entry_block = cg.context.append_basic_block(example_check_fn, "entry");
   cg.builder.position_at_end(entry_block);
@@ -70,9 +78,37 @@ pub fn examples_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Mo
   let return_val = cg.builder.build_call(callable, &[example_check_fn.get_nth_param(1).unwrap()], "return_val").try_as_basic_value().left().unwrap();
   cg.builder.build_return(Some(&return_val));
 
+  // create a function to run a single example end-to-end ("<module>__run_example").
+  let example_run_fn = cg.module.add_function(&(module.name.clone() + "__run_example"), cg.context.i64_type().fn_type(&[cg.context.i64_type().into()], false), None);
+  let entry_block = cg.context.append_basic_block(example_run_fn, "entry");
+  cg.builder.position_at_end(entry_block);
+  let state_ptr = cg.builder.build_call(example_prep_fn, &[example_run_fn.get_first_param().unwrap()], "state_ptr").try_as_basic_value().left().unwrap().into_pointer_value();
+
+  let run_update = cg.context.append_basic_block(example_run_fn, "run_update");
+  let after_update = cg.context.append_basic_block(example_run_fn, "after_update");
+
+  let bitfield_ptr = cg.module_bitfield_ptr(module, state_ptr)?;
+  let bitfield = cg.builder.build_load(bitfield_ptr, "bitfield").into_int_value();
+  let test = cg.builder.build_int_compare(IntPredicate::NE, bitfield, cg.uint_const(0), "test");
+  cg.builder.build_conditional_branch(test, run_update, after_update);
+
+  cg.builder.position_at_end(run_update);
+  let update_fn = cg.module.get_function(&(module.name.clone() + "_update")).unwrap();
+  cg.builder.build_call(update_fn, &[state_ptr.into()], "_"); 
+  let bitfield = cg.builder.build_load(bitfield_ptr, "bitfield").into_int_value();
+  let test = cg.builder.build_int_compare(IntPredicate::NE, bitfield, cg.uint_const(0), "test");
+  cg.builder.build_conditional_branch(test, run_update, after_update);
+
+  cg.builder.position_at_end(after_update);
+  let status_code = cg.builder.build_call(example_check_fn, &[example_run_fn.get_first_param().unwrap(), state_ptr.into()], "status_code").try_as_basic_value().left().unwrap();
+  cg.builder.build_return(Some(&status_code));
+
   Ok(())
 }
 
+// Prep functions:
+// (1) construct the appropriate state struct
+// (2) initialize the members to the expressions stored in the example description
 pub fn example_prep_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Module, example: &'ctx ast::Example, idx: usize) -> CodegenResult<FunctionValue<'ctx>> {
   let module_type = module.ir_type(cg).into_struct_type();
   let module_ptr_type = module_type.ptr_type(AddressSpace::Generic);
@@ -105,6 +141,10 @@ pub fn example_prep_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast
   Ok(function)
 }
 
+// Check functions:
+// (1) compare the members of the provided state struct to the expressions stored in the example description
+//    (1a) print an error message if the comparison fails
+// (2) free the provided state struct
 pub fn example_check_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Module, example: &'ctx ast::Example, idx: usize) -> CodegenResult<FunctionValue<'ctx>> {
   let module_type = module.ir_type(cg).into_struct_type();
   let module_ptr_type = module_type.ptr_type(AddressSpace::Generic);
@@ -121,6 +161,8 @@ pub fn example_check_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx as
   let state_alloca = cg.builder.build_alloca(module_ptr_type, "state_alloca");
   cg.builder.build_store(state_alloca, state_ptr);
 
+  // if a field doesn't match the result of an output expression for that field,
+  // store this in the status_code against the field's bit offset.
   for (field, value_expression) in &example.expected {
     let ptr = cg.read_ptr_for_field(module, state_ptr, field)?;
     let value = ptr.load(cg, "value_to_check")?;
