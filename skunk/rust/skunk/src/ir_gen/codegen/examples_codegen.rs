@@ -103,6 +103,40 @@ pub fn examples_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Mo
   let status_code = cg.builder.build_call(example_check_fn, &[example_run_fn.get_first_param().unwrap(), state_ptr.into()], "status_code").try_as_basic_value().left().unwrap();
   cg.builder.build_return(Some(&status_code));
 
+  // create a function to run all examples in a module ("<module>_run_examples").
+  // This returns 1 on error, or 0 on success.
+  let examples_fn = cg.module.add_function(&(module.name.clone() + "_run_examples"), cg.context.i64_type().fn_type(&[], false), None);
+  let entry_block = cg.context.append_basic_block(examples_fn, "entry");
+  cg.builder.position_at_end(entry_block);
+  let count = cg.builder.build_call(example_count_fn, &[], "count").try_as_basic_value().left().unwrap().into_int_value();
+  let count_alloca = cg.builder.build_alloca(cg.context.i64_type(), "count_alloca");
+  cg.builder.build_store(count_alloca, count);
+
+  let run_example = cg.context.append_basic_block(examples_fn, "run_example");
+  let run_example_2 = cg.context.append_basic_block(examples_fn, "run_example_2");
+  let return_block = cg.context.append_basic_block(examples_fn, "return_block");
+
+  let test = cg.builder.build_int_compare(IntPredicate::EQ, count, cg.uint_const(0), "test");
+  cg.builder.build_conditional_branch(test, return_block, run_example);
+
+  cg.builder.position_at_end(run_example);
+  let count = cg.builder.build_load(count_alloca, "count").into_int_value();
+  let new_count = cg.builder.build_int_sub(count, cg.uint_const(1), "new_count");
+  cg.builder.build_store(count_alloca, new_count);
+  let result = cg.builder.build_call(example_run_fn, &[new_count.into()], "result").try_as_basic_value().left().unwrap().into_int_value();
+  let result_test = cg.builder.build_int_compare(IntPredicate::EQ, result, cg.uint_const(0), "result_test");
+  cg.builder.build_conditional_branch(result_test, run_example_2, return_block);
+  
+  cg.builder.position_at_end(run_example_2);
+  let test = cg.builder.build_int_compare(IntPredicate::EQ, new_count, cg.uint_const(0), "test");
+  cg.builder.build_conditional_branch(test, return_block, run_example);
+
+  cg.builder.position_at_end(return_block);
+  let return_value = cg.builder.build_phi(cg.context.i64_type(), "return");
+  let success = cg.uint_const(0);
+  let failure = cg.uint_const(1);
+  return_value.add_incoming(&[(&success, entry_block), (&failure, run_example), (&success, run_example_2)]);
+  cg.builder.build_return(Some(&return_value.as_basic_value()));
   Ok(())
 }
 

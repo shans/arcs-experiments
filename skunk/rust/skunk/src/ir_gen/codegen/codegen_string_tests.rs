@@ -71,7 +71,7 @@ macro_rules! state_struct {
       type [<$name PrepVectorFunc>] = unsafe extern "C" fn(u64) -> *mut [<$name State>];
       type [<$name CheckFunc>] = unsafe extern "C" fn(*mut [<$name State>]) -> u64;
       type [<$name CheckVectorFunc>] = unsafe extern "C" fn(u64, *mut [<$name State>]) -> u64;
-      type [<$name RunFunc>] = unsafe extern "C" fn(u64) -> u64;
+      type [<$name RunFunc>] = unsafe extern "C" fn() -> u64;
     }
   }
 }
@@ -86,18 +86,11 @@ macro_rules! check_examples {
       fn [<check_examples_for_ $name>]() -> CodegenStatus {
         ee_for_string($defn, |ee: ExecutionEngine, _m| {
           unsafe {
-            //_m.print_to_stderr();
-            let count_func = concat!(stringify!($name), "__get_example_count");
-            let count_function: JitFunction<u64Func> = ee.get_function(count_func).unwrap();
-            let count = count_function.call();
-
-            let run_func = concat!(stringify!($name), "__run_example");
+            // _m.print_to_stderr();
+            let run_func = concat!(stringify!($name), "_run_examples");
             let run_function: JitFunction<[<$name RunFunc>]> = ee.get_function(run_func).unwrap();
-
-            for i in (0..count) {
-              let r= run_function.call(i);
-              assert_eq!(r, 0);
-            }
+            let r = run_function.call();
+            assert_eq!(r, 0);
           }
         })
       }
