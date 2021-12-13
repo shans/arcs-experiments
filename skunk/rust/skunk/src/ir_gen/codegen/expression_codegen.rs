@@ -215,6 +215,7 @@ pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Modul
         let rhs_value = expression_codegen(cg, module, state_alloca, &rhs)?;
         match op {
           ast::Operator::Equality => lhs_value.equals(cg, &rhs_value),
+          ast::Operator::Inequality => lhs_value.not_equals(cg, &rhs_value),
           ast::Operator::LessThan => lhs_value.less_than(cg, &rhs_value),
           ast::Operator::GreaterThan => lhs_value.greater_than(cg, &rhs_value),
           ast::Operator::LessThanOrEqual => lhs_value.less_than_or_equal(cg, &rhs_value),

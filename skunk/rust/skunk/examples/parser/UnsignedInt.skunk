@@ -1,0 +1,38 @@
+module UnsignedInt {
+  input: reads (String, Int);
+  output: writes (String, Int);
+  result: writes Int;
+  error: writes Int;
+
+  input.onChange: {
+    let offset = input.1;
+    if offset == size(input.0) || input.0[offset] < '0' || input.0[offset] > '9' {
+      error <!- 1;
+    }
+    
+    let result = 0;
+    while input.0[offset] >= '0' && input.0[offset] <= '9' {
+      result = result * 10 + input.0[offset] - '0';
+      offset = offset + 1;
+      if offset == size(input.0) {
+        break;
+      }
+    }
+
+    result <- result;
+    output <- (input.0, offset);
+  }
+
+  examples {
+    !input: ("420e", 0) -> result: 420;
+    !input: ("420e", 1) -> result: 20;
+    !input: ("420e", 2) -> result: 0;
+    !input: ("420e", 3) -> error: 1;
+
+    !input: ("in text 151 end text", 4) -> error: 1;
+    !input: ("in text 151 end text", 7) -> error: 1;
+    !input: ("in text 151 end text", 8) -> result: 151, output: ("in text 151 end text", 11);
+
+    !input: ("54 is a number", 0) -> result: 54, output: ("54 is a number", 2);
+  }
+}

@@ -77,6 +77,7 @@ pub struct CopyTo {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operator {
   Equality,
+  Inequality,
   LogicalOr,
   LogicalAnd,
   LessThan,
@@ -90,13 +91,14 @@ pub enum Operator {
 }
 
 impl Operator {
+  // precedence copied from https://doc.rust-lang.org/reference/expressions.html
   pub fn precedence(&self) -> usize {
     match self {
       Operator::Multiply | Operator::Divide => 120,
       Operator::Add | Operator::Subtract => 100,
       Operator::LogicalOr => 40,
       Operator::LogicalAnd => 50,
-      Operator::LessThan | Operator::LessThanOrEqual | Operator::GreaterThanOrEqual | Operator::GreaterThan | Operator::Equality => 60,
+      Operator::LessThan | Operator::LessThanOrEqual | Operator::GreaterThanOrEqual | Operator::GreaterThan | Operator::Equality | Operator::Inequality => 60,
     }
   }
   pub fn is_logical(&self) -> bool {

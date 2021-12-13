@@ -3,7 +3,7 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::context::Context;
 use inkwell::module::Module;
 use inkwell::types::{BasicTypeEnum, AnyTypeEnum, StructType, BasicType};
-use inkwell::values::{FunctionValue, PointerValue, BasicValueEnum, IntValue, ArrayValue};
+use inkwell::values::{FunctionValue, PointerValue, BasicValueEnum, IntValue};
 
 use super::ast;
 
@@ -14,6 +14,7 @@ use super::state_values::*;
 
 mod expression_codegen;
 mod examples_codegen;
+pub use examples_codegen::main_for_examples;
 mod debug_codegen;
 mod c_functions;
 

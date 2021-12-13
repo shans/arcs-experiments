@@ -156,6 +156,7 @@ fn function(i: Span) -> ParseResult<ast::Expression> {
 fn operator(precedence: usize) -> impl Fn(Span) -> ParseResult<ast::Operator> {
   move |i: Span| verify(alt((
     token("==", ast::Operator::Equality),
+    token("!=", ast::Operator::Inequality),
     token("||", ast::Operator::LogicalOr),
     token("&&", ast::Operator::LogicalAnd),
     token("<=", ast::Operator::LessThanOrEqual),

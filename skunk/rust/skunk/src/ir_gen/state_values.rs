@@ -454,7 +454,6 @@ impl <'ctx> StateValue<'ctx> {
                 |cg| self.size(cg)?.equals(cg, &other.size(cg)?),
                 |cg| StateValue::new_int(cg.uint_const(0)).equals(cg, &StateValue::new_int(memcmp(cg, self.into_pointer_value()?, other.into_pointer_value()?, self.size(cg)?.into_int_value()?)))
               )
-              //Ok(StateValue::new_bool(cg.context.bool_type().const_int(1, false)))
             }
             _ => todo!("")
           }
@@ -464,6 +463,10 @@ impl <'ctx> StateValue<'ctx> {
       }
       _ => todo!("equality for {:?}", value_type)
     }
+  }
+
+  pub fn not_equals(&self, cg: &mut CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    self.equals(cg, other)?.not(cg)
   }
 
   pub fn numeric_or(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
@@ -536,6 +539,16 @@ impl <'ctx> StateValue<'ctx> {
   pub fn subtract(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
     let (lhs, rhs) = StateValue::bitsize_adjusted(cg, self.into_int_value()?, other.into_int_value()?);
     Ok(StateValue::new_int(cg.builder.build_int_sub(lhs, rhs, "subtract")))
+  }
+
+  pub fn not(&self, cg: &CodegenState<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    let value_type = self.only_value_type()?;
+    match value_type {
+      TypePrimitive::Bool => {
+        Ok(StateValue::new_bool(cg.builder.build_not(self.into_int_value()?, "not")))
+      }
+      _ => Err(CodegenError::TypeMismatch("Can't execute not on non-bool types".to_string()))
+    }
   }
 }
 
