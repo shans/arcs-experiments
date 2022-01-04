@@ -8,6 +8,8 @@ use super::super::super::graph_to_module;
 use super::super::codegen_state::tests::*;
 use paste::paste;
 use std::ptr;
+use std::io;
+use std::io::Write;
 
 fn ee_for_string<F>(module: &str, func: F) -> CodegenStatus
     where F: FnOnce(ExecutionEngine, &Module) -> () {
@@ -86,9 +88,12 @@ macro_rules! check_examples {
       fn [<check_examples_for_ $name>]() -> CodegenStatus {
         ee_for_string($defn, |ee: ExecutionEngine, _m| {
           unsafe {
-            // _m.print_to_stderr();
+            //_m.print_to_stderr();
+            println!("running examples\n\n\n");
             let run_func = concat!(stringify!($name), "_run_examples");
             let run_function: JitFunction<[<$name RunFunc>]> = ee.get_function(run_func).unwrap();
+            dbg!(&run_function);
+            io::stdout().flush().unwrap();
             let r = run_function.call();
             assert_eq!(r, 0);
           }
@@ -370,8 +375,8 @@ module SyntaxTest {
     !input: (\"420e\", 0) -> result: 420;
     !input: (\"420e\", 1) -> result: 20;
     !input: (\"420e\", 2) -> result: 0;
-    !input: (\"420e\", 3) -> error: 1;
 
+    !input: (\"420e\", 3) -> error: 1;
     !input: (\"in text 151 end text\", 4) -> error: 1;
     !input: (\"in text 151 end text\", 7) -> error: 1;
     !input: (\"in text 151 end text\", 8) -> result: 151, output: (\"in text 151 end text\", 11);

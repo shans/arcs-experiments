@@ -227,6 +227,7 @@ pub fn print_if_not_null<'ctx>(cg: &mut CodegenState<'ctx>, printer: &mut dyn Pr
   Ok(())
 }
 
+// Generate a <module>__dump(state) function.
 pub fn debug_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Module) -> CodegenStatus {
 
   let module_type = module.ir_type(cg).into_struct_type();
@@ -241,13 +242,21 @@ pub fn debug_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Modul
   printer.printf(cg, &(module.name.to_string() + " "), &[])?;
   printer.open_bracket(cg, "{")?;
 
+  let state_ptr = function.get_first_param().unwrap().into_pointer_value();
   for handle in &module.handles {
     printer.printf(cg, &(handle.name.clone() + ": "), &[])?;
-    let state_ptr = function.get_first_param().unwrap().into_pointer_value();
     let field_ptr = cg.read_ptr_for_field(module, state_ptr, &handle.name)?;
     let field_value = field_ptr.load(cg, "field")?;
     field_value.debug(cg, &mut printer)?;
     printer.sep(cg, ",")?;
+  }
+
+  for param in &module.value_params {
+    printer.printf(cg, &(param.name.clone() + ": "), &[])?;
+    let param_ptr = cg.read_ptr_for_field(module, state_ptr, &param.name)?;
+    let param_value = param_ptr.load(cg, "param")?;
+    param_value.debug(cg, &mut printer)?;
+    printer.sep(cg, ", ")?;
   }
 
   printer.close_bracket(cg, "}")?;

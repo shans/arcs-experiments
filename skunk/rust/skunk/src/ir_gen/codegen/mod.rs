@@ -18,7 +18,7 @@ pub use examples_codegen::main_for_examples;
 mod debug_codegen;
 mod c_functions;
 
-pub use expression_codegen::{expression_codegen, expression_logical_and};
+pub use expression_codegen::{expression_codegen, expression_logical_and, if_else_expression};
 use examples_codegen::examples_codegen;
 pub use debug_codegen::*;
 pub use c_functions::*;
@@ -38,6 +38,11 @@ trait Nameable {
 // TODO: probably this is better done via the TypePrimitive derived from the type?
 fn handle_type<'ctx>(cg: &CodegenState<'ctx>, handle: &ast::Handle) -> BasicTypeEnum<'ctx> {
   let primitive_type = type_primitive_for_type(&handle.h_type);
+  llvm_type_for_primitive(cg, &primitive_type)
+}
+
+fn param_type<'ctx>(cg: &CodegenState<'ctx>, param: &ast::ValueParam) -> BasicTypeEnum<'ctx> {
+  let primitive_type = type_primitive_for_type(&param.vp_type);
   llvm_type_for_primitive(cg, &primitive_type)
 }
 
@@ -61,11 +66,17 @@ pub fn llvm_type_for_primitive<'ctx>(cg: &CodegenState<'ctx>, primitive_type: &V
 impl <'a> Typeable for ast::Module {
   fn ir_type<'ctx>(&self, cg: &CodegenState<'ctx>) -> AnyTypeEnum<'ctx> {
     let mut sub_types: Vec<BasicTypeEnum> = Vec::new();
+    // a value & update for each handle
     for handle in &self.handles {
       sub_types.push(handle_type(cg, handle));
       sub_types.push(handle_type(cg, handle));
     }
+    // a bitmap that describes which handles have updates
     sub_types.push(cg.context.i64_type().into());
+    // a value for each param
+    for value_param in &self.value_params {
+      sub_types.push(param_type(cg, value_param));
+    }
     for submodule_info in &self.submodules {
       sub_types.push(submodule_info.module.ir_type(cg).into_struct_type().into());
     }
@@ -271,7 +282,20 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
         todo!("Implement type lookup by field # for inline tuples")
       }
     }
-    ast::ExpressionValueEnum::BinaryOperator(lhs, op, rhs) => todo!("Implement binary operation typing"),
+    ast::ExpressionValueEnum::BinaryOperator(lhs, op, rhs) => {
+      match op {
+        ast::Operator::Add => {
+          let lhs_type = expression_type(cg, module, lhs)?;
+          let rhs_type = expression_type(cg, module, rhs)?;
+          if lhs_type != rhs_type {
+            Err(CodegenError::TypeMismatch(format!("Can't add {:?} to {:?}", lhs_type, rhs_type)))
+          } else {
+            Ok(lhs_type)
+          }
+        }
+        _ => todo!("Implement binary operation typing for {:?}", op)
+      }
+    }    
     ast::ExpressionValueEnum::While(while_expr) => todo!("Implement while typing"),
   }
 }
@@ -371,6 +395,7 @@ mod tests {
       }),
       submodules: Vec::new(),
       examples: ast::Examples { examples: Vec::new() },
+      value_params: Vec::new(),
     }
   }
 
@@ -383,6 +408,7 @@ mod tests {
       }),
       submodules: Vec::new(),
       examples: ast::Examples { examples: Vec::new() },
+      value_params: Vec::new(),
     }
   }
 

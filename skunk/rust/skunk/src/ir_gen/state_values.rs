@@ -69,7 +69,8 @@ pub enum PointerKind {
   // A dynamically (runtime) sized region of heap (or whatever). The value is 2 words big: (data_ptr, size)
   DynamicMemRegion,
   // A statically sized region of heap (or whatever). Size is given by type.
-  StaticMemRegion
+  StaticMemRegion,
+  ConstPointer
 }
 
 pub fn type_size(type_vec: &Vec<TypePrimitive>) -> u64 {
@@ -90,7 +91,7 @@ pub fn type_size(type_vec: &Vec<TypePrimitive>) -> u64 {
 #[derive(Debug)]
 pub struct StatePointer<'ctx> {
   pub pointer_kind: PointerKind,
-  pub pointer: PointerValue<'ctx>,
+  pub pointer: BasicValueEnum<'ctx>,
   pub pointer_type: Vec<TypePrimitive> // this is a pointer *to* the type primitives, i.e. these aren't necessarily all PointerTo.
 }
 
@@ -134,22 +135,25 @@ impl <'ctx> StatePointer<'ctx> {
   }
   pub fn new_from_type_primitive(ptr: PointerValue<'ctx>, pointer_type: Vec<TypePrimitive>) -> Self {
     let pointer_kind = pointer_kind_for_type_primitive(&pointer_type);
-    StatePointer { pointer_kind, pointer: ptr, pointer_type } 
+    StatePointer { pointer_kind, pointer: ptr.into(), pointer_type } 
   }
   pub fn load(&self, cg: &CodegenState<'ctx>, name: &str) -> CodegenResult<StateValue<'ctx>> {
     match self.pointer_kind {
       PointerKind::SingleWordPrimitive => {
-        let value = cg.builder.build_load(self.pointer, name);
+        let value = cg.builder.build_load(self.pointer.into_pointer_value(), name);
         Ok(StateValue { value: ValueParts::SingleWordPrimitive(value), value_type: self.pointer_type.clone() })
       }
       PointerKind::StaticMemRegion => {
-        let value = cg.builder.build_load(self.pointer, name);
+        let value = cg.builder.build_load(self.pointer.into_pointer_value(), name);
         Ok(StateValue { value: ValueParts::StaticMemRegion(value.into_pointer_value()), value_type: self.pointer_type.clone() })
       }
       PointerKind::DynamicMemRegion => {
-        let data = cg.builder.build_load(memregion_data_ptr(cg, self.pointer)?, &(name.to_string() + "_data")).into_pointer_value();
-        let size = cg.builder.build_load(memregion_size_ptr(cg, self.pointer)?, &(name.to_string() + "_size")).into_int_value();
+        let data = cg.builder.build_load(memregion_data_ptr(cg, self.pointer.into_pointer_value())?, &(name.to_string() + "_data")).into_pointer_value();
+        let size = cg.builder.build_load(memregion_size_ptr(cg, self.pointer.into_pointer_value())?, &(name.to_string() + "_size")).into_int_value();
         Ok(StateValue { value: ValueParts::DynamicMemRegion(data, size), value_type: self.pointer_type.clone() })
+      }
+      PointerKind::ConstPointer => {
+        Ok(StateValue { value: ValueParts::SingleWordPrimitive(self.pointer), value_type: self.pointer_type.clone() })
       }
     }
   }
@@ -159,19 +163,20 @@ impl <'ctx> StatePointer<'ctx> {
   pub fn clear_update_pointer(&self, cg: &CodegenState<'ctx>) -> CodegenStatus {
     match self.pointer_kind {
       PointerKind::SingleWordPrimitive => {
-        cg.builder.build_store(self.pointer, cg.uint_const(0));
+        cg.builder.build_store(self.pointer.into_pointer_value(), cg.uint_const(0));
         Ok(())
       }
       PointerKind::StaticMemRegion => {
         // TODO this probably doesn't work in all cases
-        cg.builder.build_store(self.pointer, self.pointer.get_type().get_element_type().into_pointer_type().const_null());
+        cg.builder.build_store(self.pointer.into_pointer_value(), self.pointer.into_pointer_value().get_type().get_element_type().into_pointer_type().const_null());
         Ok(())
       }
       PointerKind::DynamicMemRegion => {
-        cg.builder.build_store(memregion_data_ptr(cg, self.pointer)?, cg.uint_const(0));
-        cg.builder.build_store(memregion_size_ptr(cg, self.pointer)?, cg.uint_const(0));
+        cg.builder.build_store(memregion_data_ptr(cg, self.pointer.into_pointer_value())?, cg.uint_const(0));
+        cg.builder.build_store(memregion_size_ptr(cg, self.pointer.into_pointer_value())?, cg.uint_const(0));
         Ok(())
       }
+      PointerKind::ConstPointer => panic!("Can't clear a const pointer")
     }
   }
 
@@ -207,6 +212,12 @@ impl <'ctx> StateValue<'ctx> {
   }
   pub fn new_bool(value: IntValue<'ctx>) -> Self {
     StateValue::new_prim_of_type(value.into(), vec!(TypePrimitive::Bool))
+  }
+  pub fn new_true(cg: &CodegenState<'ctx>) -> Self {
+    StateValue::new_bool(cg.context.bool_type().const_int(1, false))
+  }
+  pub fn new_false(cg: &CodegenState<'ctx>) -> Self {
+    StateValue::new_bool(cg.context.bool_type().const_int(0, false))
   }
   pub fn new_char(value: IntValue<'ctx>) -> Self {
     StateValue::new_prim_of_type(value.into(), vec!(TypePrimitive::Char))
@@ -305,7 +316,8 @@ impl <'ctx> StateValue<'ctx> {
             printer.printf(cg, "[Bool %d]", &[v])
           }
           TypePrimitive::Char => {
-            printer.printf(cg, "[Char %c]", &[v])
+            // TODO: Printing %c isn't safe if the char isn't a sub-range of ASCII
+            printer.printf(cg, "[Char %d]", &[v])
           }
           _ => todo!("Implement debug for {:?}", value_type)
         }
@@ -345,7 +357,7 @@ impl <'ctx> StateValue<'ctx> {
     match self.value {
       ValueParts::SingleWordPrimitive(v) => {
         if ptr.pointer_kind == PointerKind::SingleWordPrimitive {
-          cg.builder.build_store(ptr.pointer, v);
+          cg.builder.build_store(ptr.pointer.into_pointer_value(), v);
           Ok(())
         } else {
           Err(CodegenError::TypeMismatch("Attempt to store integer into non-integer pointer".to_string()))
@@ -353,8 +365,8 @@ impl <'ctx> StateValue<'ctx> {
       }
       ValueParts::DynamicMemRegion(data, size) => {
         if ptr.pointer_kind == PointerKind::DynamicMemRegion {
-          cg.builder.build_store(memregion_data_ptr(cg, ptr.pointer)?, data);
-          cg.builder.build_store(memregion_size_ptr(cg, ptr.pointer)?, size);
+          cg.builder.build_store(memregion_data_ptr(cg, ptr.pointer.into_pointer_value())?, data);
+          cg.builder.build_store(memregion_size_ptr(cg, ptr.pointer.into_pointer_value())?, size);
           Ok(())
         } else {
           Err(CodegenError::TypeMismatch("Attempt to store memrange into non-memrange pointer".to_string()))
@@ -362,11 +374,11 @@ impl <'ctx> StateValue<'ctx> {
       }
       ValueParts::StaticMemRegion(data) => {
         if ptr.pointer_kind == PointerKind::StaticMemRegion {
-          cg.builder.build_store(ptr.pointer, data);
+          cg.builder.build_store(ptr.pointer.into_pointer_value(), data);
           Ok(())
         } else if ptr.pointer_kind == PointerKind::DynamicMemRegion {
-          cg.builder.build_store(memregion_data_ptr(cg, ptr.pointer)?, data);
-          cg.builder.build_store(memregion_size_ptr(cg, ptr.pointer)?, cg.uint_const(type_size(&ptr.pointer_type)));
+          cg.builder.build_store(memregion_data_ptr(cg, ptr.pointer.into_pointer_value())?, data);
+          cg.builder.build_store(memregion_size_ptr(cg, ptr.pointer.into_pointer_value())?, cg.uint_const(type_size(&ptr.pointer_type)));
           Ok(())
         } else {
           Err(CodegenError::TypeMismatch("Attempt to store static-size region into non-region pointer".to_string()))
@@ -425,7 +437,7 @@ impl <'ctx> StateValue<'ctx> {
     // TODO: non-unitary types
     let value_type = self.only_value_type()?;
     match value_type {
-      TypePrimitive::Char | TypePrimitive::Int => node.add_incoming(&[(&self.into_int_value()?, block)]),
+      TypePrimitive::Char | TypePrimitive::Int | TypePrimitive::Bool => node.add_incoming(&[(&self.into_int_value()?, block)]),
       _ => todo!("phi node processing for non-primitive types")
     }
     Ok(())
@@ -435,14 +447,41 @@ impl <'ctx> StateValue<'ctx> {
     match value_type {
       TypePrimitive::Char | TypePrimitive::Int | TypePrimitive::Bool => self.apply_int_predicate(cg, IntPredicate::EQ, other),
       TypePrimitive::PointerTo(struct_type) => {
-        let mut result = StateValue::new_bool(cg.context.bool_type().const_int(1, false));
-        for (idx, _member_type) in struct_type.iter().enumerate() {
-          let lhs = self.get_tuple_index(cg, idx as u32)?;
-          let rhs = other.get_tuple_index(cg, idx as u32)?;
-          // TODO: this clone of result is unpleasant
-          result = expression_logical_and(cg, move |_cg| Ok(result.clone()), |cg| lhs.equals(cg, &rhs))?
-        }
-        Ok(result)
+        // TODO: need to check whether self and/or other is NULL.
+        let self_as_int = cg.builder.build_ptr_to_int(self.into_pointer_value()?, cg.context.i64_type(), "self_as_int");
+        let self_is_null = cg.builder.build_int_compare(IntPredicate::EQ, self_as_int, cg.uint_const(0), "self_is_null");
+
+        let other_as_int = cg.builder.build_ptr_to_int(other.into_pointer_value()?, cg.context.i64_type(), "other_as_int");
+        let other_is_null = cg.builder.build_int_compare(IntPredicate::EQ, other_as_int, cg.uint_const(0), "other_is_null");
+
+        // if (self_is_null) {
+        //   return other_is_null;
+        // } else {
+        //   if (other_is_null) {
+        //     return false;
+        //   } else {
+        //     .. do normal check
+        //   }
+        // }
+
+
+        if_else_expression(cg, self_is_null,
+          |_cg| Ok(StateValue::new_bool(other_is_null)),
+          |cg| if_else_expression(cg, other_is_null,
+            |cg| Ok(StateValue::new_false(cg)),
+            |cg| {
+              let mut result = StateValue::new_bool(cg.context.bool_type().const_int(1, false));
+              for (idx, _member_type) in struct_type.iter().enumerate() {
+                let lhs = self.get_tuple_index(cg, idx as u32)?;
+                let rhs = other.get_tuple_index(cg, idx as u32)?;
+                // TODO: this clone of result is unpleasant
+                result = expression_logical_and(cg, move |_cg| Ok(result.clone()), |cg| lhs.equals(cg, &rhs))?
+              }
+              Ok(result)
+            }
+          )
+        )
+
       }
       TypePrimitive::DynamicArrayOf(array_member_type) => {
         // specialization for array of single type is to use memcmp
@@ -560,11 +599,22 @@ pub enum UpdatePtrPurpose {
 
 impl <'ctx> CodegenState<'ctx> {
   pub fn read_ptr_for_field(&self, module: &ast::Module, state: PointerValue<'ctx>, name: &str) -> CodegenResult<StatePointer<'ctx>> {
-    let idx = module.idx_for_field(name).ok_or(CodegenError::BadReadFieldName(name.to_string()))?;
     let h_type = module.type_for_field(name).ok_or(CodegenError::BadReadFieldName(name.to_string()))?;
-    let struct_idx = (2 * idx).try_into().or(Err(CodegenError::InvalidIndex))?;
-    let ptr = self.builder.build_struct_gep(state, struct_idx, &("read_ptr_to".to_string() + name)).or(Err(CodegenError::InvalidStructPointer("read_ptr_for_field given bad state pointer".to_string())))?;
-    Ok(StatePointer::new(ptr, h_type))
+    if let Some(idx) = module.idx_for_field(name) {
+      let struct_idx = (2 * idx).try_into().or(Err(CodegenError::InvalidIndex))?;
+      let ptr = self.builder.build_struct_gep(state, struct_idx, &("read_ptr_to".to_string() + name)).or(Err(CodegenError::InvalidStructPointer("read_ptr_for_field given bad state pointer".to_string())))?;
+      Ok(StatePointer::new(ptr, h_type))
+    } else if let Some(idx) = module.value_param_idx_for_field(name) {
+      dbg!(idx);
+      dbg!(state.get_type());
+      let param_idx = module.idx_for_bitfield() + idx + 1;
+      dbg!(param_idx);
+      dbg!(&h_type);
+      let ptr = self.builder.build_struct_gep(state, param_idx as u32, &("read_param_ptr_to".to_string() + name)).or(Err(CodegenError::InvalidStructPointer("read_ptr_for_field given bad state pointer".to_string())))?;
+      Ok(StatePointer::new(ptr, h_type))
+    } else {
+      Err(CodegenError::BadReadFieldName(name.to_string()))
+    }
   }
 
   pub fn update_ptr_for_field(&self, module: &ast::Module, state: PointerValue<'ctx>, name: &str, purpose: UpdatePtrPurpose) -> CodegenResult<StatePointer<'ctx>> {

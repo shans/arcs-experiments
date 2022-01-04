@@ -83,3 +83,15 @@ pub fn get_va_start<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
 pub fn get_va_end<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
   cg.module.get_function("llvm.va_end").or_else(|| Some(cg.module.add_function("llvm.va_end", cg.context.void_type().fn_type(&[cg.char_ptr_type().into()], false), None))).unwrap()
 }
+
+pub fn memset<'ctx>(cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>, c: IntValue<'ctx>, n: IntValue<'ctx>) -> PointerValue<'ctx> {
+  let memset = get_memset(cg);
+  cg.builder.build_call(memset, &[ptr.into(), c.into(), n.into()], "memset_result").try_as_basic_value().left().unwrap().into_pointer_value()
+}
+
+pub fn get_memset<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
+  cg.module.get_function("memset").or_else(|| {
+    let function_type = cg.char_ptr_type().fn_type(&[cg.char_ptr_type().into(), cg.context.i8_type().into(), cg.context.i32_type().into()], false);
+    Some(cg.module.add_function("memset", function_type, None))
+  }).unwrap()
+}

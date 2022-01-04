@@ -39,26 +39,10 @@ pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Modul
       let test_as_int = test.into_int_value()?;
       let test_against = test_as_int.get_type().const_zero();
       let cmp = cg.builder.build_int_compare(IntPredicate::NE, test_as_int, test_against, "if_true");
-      let if_true = append_new_block(cg, "if_true_block")?;
-      let if_false = append_new_block(cg, "if_false_block")?;
-      let after_if = append_new_block(cg, "after_if")?;
-      cg.builder.build_conditional_branch(cmp, if_true, if_false);
-      cg.builder.position_at_end(if_true);
-      let result_if_true = expression_codegen(cg, module, state_alloca, if_expression.if_true.as_ref())?;
-      cg.builder.build_unconditional_branch(after_if);
-      cg.builder.position_at_end(if_false);
-      let result_if_false = expression_codegen(cg, module, state_alloca, if_expression.if_false.as_ref())?;
-      cg.builder.build_unconditional_branch(after_if);
-      cg.builder.position_at_end(after_if);
-
-      if result_if_true.is_none() {
-        Ok(result_if_true)
-      } else {
-        let phi = cg.builder.build_phi(result_if_true.llvm_type(), "if_result");
-        result_if_true.add_to_phi_node(phi, if_true)?;
-        result_if_false.add_to_phi_node(phi, if_false)?;
-        Ok(StateValue::new_int(phi.as_basic_value().into_int_value()))
-      }
+      if_else_expression(cg, cmp, 
+        |cg| expression_codegen(cg, module, state_alloca, if_expression.if_true.as_ref()),
+        |cg| expression_codegen(cg, module, state_alloca, if_expression.if_false.as_ref())
+      )
     }
 
     ast::ExpressionValueEnum::While(while_expression) => {
@@ -251,4 +235,34 @@ pub fn expression_logical_and<'ctx>(
   let phi = cg.builder.build_phi(lhs_value.get_type(), "logical-and-result");
   phi.add_incoming(&[(&lhs_value, lhs_block), (&rhs_value, rhs_block)]);
   Ok(StateValue::new_bool(phi.as_basic_value().into_int_value()))
+}
+
+pub fn if_else_expression<'ctx>(
+  cg: &mut CodegenState<'ctx>,
+  test: IntValue<'ctx>,
+  true_expr: impl Fn(&mut CodegenState<'ctx>) -> CodegenResult<StateValue<'ctx>>,
+  false_expr: impl Fn(&mut CodegenState<'ctx>) -> CodegenResult<StateValue<'ctx>>
+) -> CodegenResult<StateValue<'ctx>> {
+  let if_true = append_new_block(cg, "if_true_block")?;
+  let if_false = append_new_block(cg, "if_false_block")?;
+  let after_if = append_new_block(cg, "after_if")?;
+  cg.builder.build_conditional_branch(test, if_true, if_false);
+  cg.builder.position_at_end(if_true);
+  let result_if_true = true_expr(cg)?;
+  let if_true = cg.builder.get_insert_block().unwrap();
+  cg.builder.build_unconditional_branch(after_if);
+  cg.builder.position_at_end(if_false);
+  let result_if_false = false_expr(cg)?;
+  let if_false = cg.builder.get_insert_block().unwrap();
+  cg.builder.build_unconditional_branch(after_if);
+  cg.builder.position_at_end(after_if);
+
+  if result_if_true.is_none() {
+    Ok(result_if_true)
+  } else {
+    let phi = cg.builder.build_phi(result_if_true.llvm_type(), "if_result");
+    result_if_true.add_to_phi_node(phi, if_true)?;
+    result_if_false.add_to_phi_node(phi, if_false)?;
+    Ok(StateValue::new_int(phi.as_basic_value().into_int_value()))
+  }
 }

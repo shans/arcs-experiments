@@ -346,17 +346,28 @@ pub struct Examples {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct ValueParam {
+  pub name: String,
+  pub vp_type: Type,
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub struct Module {
   pub name: String,
   pub handles: Vec<Handle>,
   pub listeners: Vec<Listener>,
   pub submodules: Vec<ModuleInfo>,
   pub examples: Examples,
+  pub value_params: Vec<ValueParam>,
 }
 
 impl Module {
   pub fn idx_for_field(&self, field: &str) -> Option<usize> {
     self.handles.iter().position(|handle| handle.name == field)
+  }
+
+  pub fn value_param_idx_for_field(&self, field: &str) -> Option<usize> {
+    self.value_params.iter().position(|param| param.name == field)
   }
 
   pub fn idx_for_bitfield(&self) -> usize {
@@ -375,8 +386,18 @@ impl Module {
     self.handles.iter().find(|handle| handle.name == field)
   }
 
+  pub fn value_param_for_field(&self, field: &str) -> Option<&ValueParam> {
+    self.value_params.iter().find(|param| param.name == field)
+  }
+
   pub fn type_for_field(&self, field: &str) -> Option<Type> {
-    Some(self.handle_for_field(field)?.h_type.clone())
+    if let Some(handle) = self.handle_for_field(field) {
+      Some(handle.h_type.clone())
+    } else if let Some(param) = self.value_param_for_field(field) {
+      Some(param.vp_type.clone())
+    } else {
+      None
+    } 
   }
 }
 

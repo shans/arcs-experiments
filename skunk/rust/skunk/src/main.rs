@@ -173,6 +173,7 @@ fn build_test_examples(main_data: &mut MainData, location: &str) -> Result<(), S
 
   let mut objects: Vec<String> = Vec::new();
   for module in &cg_modules {
+    module.print_to_stderr();
     let name = module.get_name().to_str().unwrap();
     let object_name = name.to_string() + ".o";
     let path = Path::new(&object_name);
@@ -187,7 +188,7 @@ fn build_test_examples(main_data: &mut MainData, location: &str) -> Result<(), S
   objects.push(object_name.to_string());
 
   let mut command = Command::new("clang");
-  let mut cmd = command.arg("-o").arg("run_examples");
+  let mut cmd = command.arg("-o").arg(&(location.to_string() + "_examples"));
   for object in objects {
     cmd = cmd.arg(object);
   }

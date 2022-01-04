@@ -156,12 +156,14 @@ pub fn example_prep_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast
   let module_size = module_type.size_of().unwrap();
   let module_size32 = cg.builder.build_int_cast(module_size, cg.context.i32_type(), "module_size32");
   let state_ptr_as_char_ptr = malloc(cg, module_size32.into(), "malloced-state").into_pointer_value();
+  memset(cg, state_ptr_as_char_ptr, cg.context.i8_type().const_zero(), module_size32);
   let state_ptr = cg.builder.build_bitcast(state_ptr_as_char_ptr, module_ptr_type, "state_ptr").into_pointer_value();
   let state_alloca = cg.builder.build_alloca(module_ptr_type, "state_alloca");
   cg.builder.build_store(state_alloca, state_ptr);
 
   let bitfield_ptr = cg.module_bitfield_ptr(module, state_ptr)?;
   cg.builder.build_store(bitfield_ptr, cg.uint_const(0));
+
 
   for (field, value_expression) in &example.inputs {
     let value = expression_codegen(cg, module, state_alloca, &value_expression.value.value)?;
@@ -173,6 +175,11 @@ pub fn example_prep_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast
       value.store(cg, &ptr)?;
     }
   }
+  /*
+  let dump = cg.module.get_function(&(module.name.clone() + "__dump")).unwrap();
+  cg.builder.build_call(dump, &[state_ptr.into()], "_");
+  */
+
   cg.builder.build_return(Some(&state_ptr));
   Ok(function)
 }
@@ -218,6 +225,7 @@ pub fn example_check_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx as
 
     cg.builder.position_at_end(next_block);
   }
+
 
   let status_code = cg.builder.build_load(status_code_alloca, "status_code").into_int_value();
 
@@ -277,6 +285,5 @@ pub fn main_for_examples<'ctx>(context: &'ctx Context, target_machine: &TargetMa
 
   cg.builder.build_return(Some(&context.i32_type().const_zero()));
 
-  cg.module.print_to_stderr();
   Ok(cg.module)
 }

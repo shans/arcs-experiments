@@ -363,12 +363,25 @@ fn examples(i: Span) -> ParseResult<ast::Examples> {
   Ok((i, ast::Examples { examples }))
 }
 
+fn module_param(i: Span) -> ParseResult<ast::ValueParam> {
+  let (i, (name, vp_type)) = tuple((delimited(multispace0, name, multispace0), delimited(terminated(char(':'), multispace0), handle_type, multispace0)))(i)?;
+  Ok((i, ast::ValueParam { name: name.fragment().to_string(), vp_type }))
+}
+
+fn module_params(i: Span) -> ParseResult<Vec<ast::ValueParam>> {
+  delimited(char('<'), separated_list1(tuple((multispace0, char(','), multispace0)), module_param), char('>'))(i)
+}
+
 fn module(i: Span) -> ParseResult<ast::Module> {
-  let (input, (_, _, name, _, _, _, handles, _, listeners, _, examples, _, _))
-    = tuple((tag("module"), multispace1, uppercase_name, multispace0, char('{'), multispace0, handles, multispace0, listeners, multispace0, opt(examples), multispace0, char('}')))(i)?;
+  let (input, (_, _, name, _, params, _, _, handles, _, listeners, _, examples, _, _))
+    = tuple((tag("module"), multispace1, uppercase_name, multispace0, opt(terminated(module_params, multispace0)), char('{'), multispace0, handles, multispace0, listeners, multispace0, opt(examples), multispace0, char('}')))(i)?;
   let examples = match examples {
     None => ast::Examples { examples: Vec::new() },
     Some(e) => e
+  };
+  let params = match params {
+    None => Vec::new(),
+    Some(p) => p
   };
   Ok((
     input,
@@ -378,6 +391,7 @@ fn module(i: Span) -> ParseResult<ast::Module> {
       listeners,
       submodules: Vec::new(),
       examples,
+      value_params: params,
     }
   ))
 }
@@ -556,6 +570,7 @@ mod tests {
       }), 
       submodules: Vec::new(),
       examples: ast::Examples { examples: Vec::new() },
+      value_params: Vec::new(),
     }
   }
 
