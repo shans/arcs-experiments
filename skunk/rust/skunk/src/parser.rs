@@ -396,15 +396,61 @@ fn module(i: Span) -> ParseResult<ast::Module> {
   ))
 }
 
-fn graph(i: Span) -> ParseResult<ast::Graph> {
+fn graph_module_specifier(i: Span) -> ParseResult<ast::GraphModuleInfo> {
+  let (i, (local_name, module_name, _)) =
+  tuple((
+    opt(delimited(char('$'), name, tuple((multispace0, char(':'), multispace0)))),
+    uppercase_name,
+    opt(delimited(
+      tuple((char('<'), multispace0)),
+      separated_list1(tuple((multispace0, char(','), multispace0)), expression(0)),
+      tuple((multispace0, char('>')))
+    ))
+  ))(i)?;
+  Ok((i, ast::GraphModuleInfo::module(module_name.fragment(), local_name.map(|name| *name.fragment()))))
+}
+
+fn graph_module_tuple(i: Span) -> ParseResult<ast::GraphModuleInfo> {
+  let (i, gmi_list) = delimited(
+    tuple((char('('), multispace0)),
+    separated_list1(tuple((multispace0, char(','), multispace0)), graph_module_info),
+    tuple((multispace0, char(')')))
+  )(i)?;
+  Ok((i, ast::GraphModuleInfo::Tuple(gmi_list)))
+}
+
+fn graph_name_specifier(i: Span) -> ParseResult<ast::GraphModuleInfo> {
+  let (i, name) = preceded(char('$'), name)(i)?;
+  Ok((i, ast::GraphModuleInfo::Module(ast::ModuleSpecifier::Name(name.to_string()))))
+}
+
+fn field_specifier(i: Span) -> ParseResult<ast::GraphModuleInfo> {
+  let (i, name) = name(i)?;
+  Ok((i, ast::GraphModuleInfo::Field(ast::ModuleSpecifier::This, name.to_string())))
+}
+
+fn graph_module_info(i: Span) -> ParseResult<ast::GraphModuleInfo> {
+  alt((graph_module_tuple, graph_module_specifier, graph_name_specifier, field_specifier))(i)
+}
+
+fn graph(i: Span) -> ParseResult<ast::GraphDirective> {
   let (input, names) = terminated(
-    separated_list1(tuple((multispace0, tag("->"), multispace0)), uppercase_name), 
+    separated_list1(tuple((multispace0, tag("->"), multispace0)), graph_module_info), 
     tuple((multispace0, char(';')))
   )(i)?;
   Ok((
     input,
-    ast::Graph { modules: names.iter().map(|s| s.to_string()).collect() }
+    ast::GraphDirective::Chain(names)
   ))
+}
+
+fn use_statement(i: Span) -> ParseResult<ast::Use> {
+  let (input, name) = delimited(
+    tuple((tag("uses"), multispace1)),
+    uppercase_name,
+    tuple((multispace0, char(';')))
+  )(i)?;
+  Ok((input, ast::Use { name: name.to_string() }))
 }
 
 fn graph_top_level(i: Span) -> ParseResult<ast::TopLevel> {
@@ -417,8 +463,13 @@ fn module_top_level(i: Span) -> ParseResult<ast::TopLevel> {
   Ok((input, ast::TopLevel::Module(module)))
 }
 
+fn use_top_level(i: Span) -> ParseResult<ast::TopLevel> {
+  let (input, use_statement) = use_statement(i)?;
+  Ok((input, ast::TopLevel::Use(use_statement)))
+}
+
 fn top_level(i: Span) -> ParseResult<ast::TopLevel> {
-  alt((graph_top_level, module_top_level))(i)
+  alt((graph_top_level, module_top_level, use_top_level))(i)
 }
 
 // TODO: Make this private, and provide a public wrapper that is nicer
@@ -575,9 +626,13 @@ mod tests {
   }
 
   static TEST_GRAPH_STRING : &str = "MyModule -> MyModule2 -> AnotherModule;";
-  
-  fn test_graph_result() -> ast::Graph {
-    ast::Graph { modules: vec!(String::from("MyModule"), String::from("MyModule2"), String::from("AnotherModule")) }
+ 
+  fn gmi(name: &str) -> ast::GraphModuleInfo {
+    ast::GraphModuleInfo::module(name, None)
+  }
+
+  fn test_graph_result() -> ast::GraphDirective {
+    ast::GraphDirective::Chain(vec!(gmi("MyModule"), gmi("MyModule2"), gmi("AnotherModule")))
   }
 
   #[test]
@@ -600,7 +655,7 @@ mod tests {
   fn parse_top_level() {
     assert_eq!(
       top_level(Span::new(TEST_MODULE_STRING)).unwrap().1,
-      ast::TopLevel::Module(test_module_result(0, 1))   
+      ast::TopLevel::Module(test_module_result(0, 1))    
     );
     assert_eq!(
       top_level(Span::new(TEST_GRAPH_STRING)).unwrap().1,
@@ -617,6 +672,18 @@ mod tests {
     )
   }
   
+  #[test]
+  fn parse_graph_tuple() {
+    let test_str = "(Module1, Module2)";
+    assert_eq!(
+      graph_module_tuple(Span::new(&test_str)).unwrap().1,
+      ast::GraphModuleInfo::Tuple(vec!(
+        ast::GraphModuleInfo::Module(ast::ModuleSpecifier::Module("Module1".to_string())),
+        ast::GraphModuleInfo::Module(ast::ModuleSpecifier::Module("Module2".to_string())),
+      ))
+    );
+  }
+
   #[test]
   fn parse_expression_test() {
     assert_eq!(

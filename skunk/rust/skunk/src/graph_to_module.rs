@@ -93,7 +93,7 @@ impl <'a> ModuleContext<'a> {
       for connection in candidate_connections {
         // We have a connection that connects to the constructed handle. From that we need to fetch the connected module..
         let connection_idx = connection.connection_idx().unwrap();
-        let candidate_modules = self.graph.endpoints_associated_with_endpoint(connection, graph::EndpointSpec::AnyModule);
+        let candidate_modules = self.graph.endpoints_associated_with_endpoint(*connection, graph::EndpointSpec::AnyModule);
         if candidate_modules.len() != 1 {
           return Err(GraphToModuleError::MultipleModulesForConnection(self.graph.connections[connection_idx].clone()));
         }

@@ -1,5 +1,8 @@
 
-use super::ast::Type;
+use super::ast::{Type, ModuleSpecifier};
+
+use std::collections::hash_map::HashMap;
+use std::slice::from_ref;
 
 #[derive(Debug)]
 pub struct Handle {
@@ -46,9 +49,40 @@ impl Endpoint {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Arrow {
+pub struct TransferArrow {
   pub from: Endpoint,
   pub to: Endpoint,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct TupleStructureArrow {
+  pub from: Vec<Endpoint>,
+  pub to: Endpoint,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Arrow {
+  Transfer(TransferArrow),
+  TupleStructure(TupleStructureArrow),
+}
+
+impl Arrow {
+  pub fn from(&self) -> &[Endpoint] {
+    match self {
+      Arrow::Transfer(ta) => from_ref(&ta.from),
+      Arrow::TupleStructure(tsa) => &tsa.from,
+    }
+  }
+  pub fn to(&self) -> &[Endpoint] {
+    match self {
+      Arrow::Transfer(ta) => from_ref(&ta.to),
+      Arrow::TupleStructure(tsa) => from_ref(&tsa.to),
+    }
+  }
+}
+
+fn one_matches_spec(endpoints: &[Endpoint], spec: EndpointSpec) -> bool {
+  endpoints.iter().any(|e| e.matches_spec(spec))
 }
 
 #[derive(Debug)]
@@ -56,17 +90,27 @@ pub struct Graph {
   pub modules: Vec<String>,
   pub connections: Vec<String>,
   pub handles: Vec<Handle>,
-  arrows: Vec<Arrow>
+  arrows: Vec<Arrow>,
+  pub names: HashMap<String, usize>
 }
 
 impl Graph {
   pub fn new() -> Graph {
-    Graph { modules: Vec::new(), connections: Vec::new(), handles: Vec::new(), arrows: Vec::new() }
+    Graph { modules: Vec::new(), connections: Vec::new(), handles: Vec::new(), arrows: Vec::new(), names: HashMap::new() }
   }
 
-  pub fn add_module(&mut self, module_name: &str) -> Endpoint {
-    self.modules.push(module_name.to_string());
-    Endpoint::Module(self.modules.len() - 1)
+  pub fn add_module(&mut self, module_name: &ModuleSpecifier) -> Endpoint {
+    let mut idx = self.modules.len();
+    match module_name {
+      ModuleSpecifier::This => todo!("Probably this doesn't make sense?"),
+      ModuleSpecifier::Module(name) => self.modules.push(name.to_string()),
+      ModuleSpecifier::NamedModule(local_name, name) => {
+        self.modules.push(name.to_string());
+        self.names.insert(local_name.clone(), idx);
+      }
+      ModuleSpecifier::Name(local_name) => idx = *self.names.get(local_name).unwrap()
+    }
+    Endpoint::Module(idx)
   }
 
   pub fn add_connection(&mut self, connection_name: &str) -> Endpoint {
@@ -94,11 +138,13 @@ impl Graph {
     }
   }
 
+  // Remove and return any arrows matching (from_spec -> to_spec).
+  // Note that this will pick up structure/destructure arrows where one endpoint matches from_spec or to_spec.
   fn filter_arrows(&mut self, from_spec: EndpointSpec, to_spec: EndpointSpec) -> Vec<Arrow> {
     let mut remaining = Vec::new();
     let mut returning = Vec::new();
     self.arrows.drain(..).for_each(|arrow| {
-      if arrow.from.matches_spec(from_spec) && arrow.to.matches_spec(to_spec) {
+      if one_matches_spec(arrow.from(), from_spec) && one_matches_spec(arrow.to(), to_spec) {
         returning.push(arrow);
       } else {
         remaining.push(arrow);
@@ -108,20 +154,24 @@ impl Graph {
     returning
   }
 
+  // Return any arrows matching (from_spec -> to_spec).
+  // Note that this will pick up structure/destructure arrows where one endpoint matches from_spec or to_spec.
   pub fn arrows_matching(&self, from_spec: EndpointSpec, to_spec: EndpointSpec) -> Vec<&Arrow> {
-    self.arrows.iter().filter(|arrow| arrow.from.matches_spec(from_spec) && arrow.to.matches_spec(to_spec)).collect()
+    self.arrows.iter().filter(|arrow| one_matches_spec(arrow.from(), from_spec) && one_matches_spec(arrow.to(), to_spec)).collect()
   }
 
+  // Return any arrows matching (endpoint -> spec) or (spec -> endpoint).
   pub fn arrows_involving_endpoint(&self, endpoint: Endpoint, spec: EndpointSpec) -> Vec<&Arrow> {
     let mut lhs = self.arrows_matching(EndpointSpec::Specific(endpoint), spec);
     lhs.append(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)));
     lhs
   }
 
-  pub fn endpoints_associated_with_endpoint(&self, endpoint: Endpoint, spec: EndpointSpec) -> Vec<Endpoint> {
+  // Return all endpoints associated with spec matching (endpoing -> spec) or (spec -> endpoint)
+  pub fn endpoints_associated_with_endpoint(&self, endpoint: Endpoint, spec: EndpointSpec) -> Vec<&Endpoint> {
     let lhs = self.arrows_matching(EndpointSpec::Specific(endpoint), spec);
-    let lhs = lhs.iter().map(|endpoint| endpoint.to);
-    lhs.chain(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)).iter().map(|endpoint| endpoint.from)).collect()
+    let lhs = lhs.iter().map(|endpoint| endpoint.to());
+    lhs.chain(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)).iter().map(|endpoint| endpoint.from())).flatten().collect()
   }
 
   pub fn filter_module_to_module_connections(&mut self) -> Vec<Arrow> {
@@ -131,7 +181,7 @@ impl Graph {
 
 impl Arrow {
   pub fn new(from: Endpoint, to: Endpoint) -> Arrow {
-    Arrow { from, to }
+    Arrow::Transfer(TransferArrow { from, to })
   }
 }
 
@@ -142,8 +192,8 @@ mod tests {
   #[test]
   fn filter_module_to_module_connections_works() {
     let mut graph = Graph::new();
-    let m0 = graph.add_module("mod1");
-    let m1 = graph.add_module("mod2");
+    let m0 = graph.add_module(&ModuleSpecifier::Module("mod1".to_string()));
+    let m1 = graph.add_module(&ModuleSpecifier::Module("mod2".to_string()));
     let c0 = graph.add_connection("c0");
     graph.connect(m0, m1);
     graph.connect(m0, c0);

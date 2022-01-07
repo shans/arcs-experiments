@@ -402,30 +402,61 @@ impl Module {
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Graph {
-  pub modules: Vec<String>,
+pub enum ModuleSpecifier {
+  This,
+  Module(String),
+  // local_name first, then module_name
+  NamedModule(String, String),
+  Name(String),
+}
+
+#[derive(Debug, PartialEq)]
+pub enum GraphModuleInfo {
+  Module(ModuleSpecifier),
+  Field(ModuleSpecifier, String),
+  Tuple(Vec<GraphModuleInfo>),
+}
+
+impl GraphModuleInfo {
+  pub fn module(name: &str, local_name: Option<&str>) -> GraphModuleInfo {
+    match local_name {
+      None => GraphModuleInfo::Module(ModuleSpecifier::Module(name.to_string())),
+      Some(local_name) => GraphModuleInfo::Module(ModuleSpecifier::NamedModule(local_name.to_string(), name.to_string()))
+    }
+  }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum GraphDirective {
+  Chain(Vec<GraphModuleInfo>),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Use {
+  pub name: String,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum TopLevel {
   Module(Module),
-  Graph(Graph),
+  Graph(GraphDirective),
+  Use(Use),
 }
 
 pub fn modules(ast: &Vec<TopLevel>) -> Vec<&Module> {
   ast.iter().filter_map(|top_level| {
     match top_level {
       TopLevel::Module(m) => Some(m),
-      TopLevel::Graph(_g) => None
+      _ => None
     }
   }).collect()
 }
 
-pub fn graphs(ast: &Vec<TopLevel>) -> Vec<&Graph> {
+pub fn graphs(ast: &Vec<TopLevel>) -> Vec<&GraphDirective> {
   ast.iter().filter_map(|top_level| {
     match top_level {
-      TopLevel::Module(_m) => None,
-      TopLevel::Graph(g) => Some(g)
+      TopLevel::Graph(g) => Some(g),
+      _ => None
     }
   }).collect()
 }
