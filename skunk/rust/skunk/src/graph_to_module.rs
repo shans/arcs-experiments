@@ -84,7 +84,7 @@ impl <'a> ModuleContext<'a> {
     // and shared between sub-modules. These aren't part of the public interface but they're accessible from outside the outer module.
     let mut index = 0;
     for handle in &self.graph.handles {
-      let candidate_connections = self.graph.endpoints_associated_with_endpoint(graph::Endpoint::Handle(index), graph::EndpointSpec::AnyConnection);
+      let candidate_connections = self.graph.endpoints_associated_with_endpoint(graph::SimpleEndpoint::Handle(index), graph::EndpointSpec::AnyConnection);
       let mut candidate_found = false;
 
       let mut mapped_for_submodules = Vec::new();
@@ -93,7 +93,7 @@ impl <'a> ModuleContext<'a> {
       for connection in candidate_connections {
         // We have a connection that connects to the constructed handle. From that we need to fetch the connected module..
         let connection_idx = connection.connection_idx().unwrap();
-        let candidate_modules = self.graph.endpoints_associated_with_endpoint(*connection, graph::EndpointSpec::AnyModule);
+        let candidate_modules = self.graph.endpoints_associated_with_endpoint(connection.simple_endpoint().unwrap(), graph::EndpointSpec::AnyModule);
         if candidate_modules.len() != 1 {
           return Err(GraphToModuleError::MultipleModulesForConnection(self.graph.connections[connection_idx].clone()));
         }
@@ -152,10 +152,10 @@ impl <'a> ModuleContext<'a> {
     // "connected connections" are all the connections which the graph indicates are connected (i.e. there's an arrow from the module to them).
     // We are relying on the lack of blind connections - i.e. we're assuming that if there's an arrow between a module M and a connection C,
     // then C will also have an arrow to a handle H  -   M -> C -> H or H -> C -> M.
-    let connected_connections: Vec<&str> = self.graph.endpoints_associated_with_endpoint(graph::Endpoint::Module(module_info.index), graph::EndpointSpec::AnyConnection)
+    let connected_connections: Vec<&str> = self.graph.endpoints_associated_with_endpoint(graph::SimpleEndpoint::Module(module_info.index), graph::EndpointSpec::AnyConnection)
       .iter().map(|endpoint| {
-        match endpoint {
-          graph::Endpoint::Connection(idx) => self.graph.connections[*idx].as_str(),
+        match endpoint.simple_endpoint().unwrap() {
+          graph::SimpleEndpoint::Connection(idx) => self.graph.connections[idx].as_str(),
           _ => panic!("Shouldn't be possible to have non-connection endpoints here")
         }
       }).collect();

@@ -25,7 +25,7 @@ pub fn add_graph(graph: &mut graph::Graph, ast: &ast::GraphDirective) {
   
       for i in 1..modules.len() {
         let idx = add_graph_module_info(graph, &modules[i]);
-        graph.connect(prev_idx, idx);
+        graph.connect(&prev_idx, &idx);
         prev_idx = idx;
       }
     }
@@ -35,6 +35,17 @@ pub fn add_graph(graph: &mut graph::Graph, ast: &ast::GraphDirective) {
 pub fn add_graph_module_info(graph: &mut graph::Graph, info: &ast::GraphModuleInfo) -> graph::Endpoint {
   match info {
     ast::GraphModuleInfo::Module(specifier) => graph.add_module(specifier),
+    ast::GraphModuleInfo::Tuple(specifiers) => {
+      let endpoints = specifiers.iter().map(|s| add_graph_module_info(graph, s));
+      let simple_endpoints = endpoints.map(|e| {
+        if let graph::Endpoint::Simple(se) = e {
+          se
+        } else {
+          todo!("can a tuple contain complex endpoints?");
+        }
+      }).collect();
+      graph::Endpoint::Tuple(simple_endpoints)
+    }
     _ => todo!("can't add {:?} to a graph yet", info)
   }
 }
@@ -76,40 +87,22 @@ fn only_matching_connection<'a, 'b>(from_module: &'a ast::Module, to_module: &'b
   matches[0].clone()
 }
 
-fn only_from(arrow: &graph::Arrow) -> Result<&graph::Endpoint, GraphBuilderError> {
-  let froms = arrow.from();
-  if froms.len() == 1 {
-    Ok(&froms[0])
-  } else {
-    todo!("Need to consider how to consider multiple endpoints when expanding to full connection")
-  }
-}
-
-fn only_to(arrow: &graph::Arrow) -> Result<&graph::Endpoint, GraphBuilderError> {
-  let tos = arrow.to();
-  if tos.len() == 1 {
-    Ok(&tos[0])
-  } else {
-    todo!("Need to consider how to consider multiple endpoints when expanding to full connection")
-  }
-}
-
 fn expand_to_full_connection(modules: &Vec<&ast::Module>, graph: &mut graph::Graph, connection: &graph::Arrow) -> Result<(), GraphBuilderError> {
-  let conn_from = only_from(connection)?;
-  let conn_to = only_to(connection)?;
-  let from_module_idx = conn_from.module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(*conn_from))?;
-  let to_module_idx = conn_to.module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(*conn_to))?;
+  let conn_from = &connection.from;
+  let conn_to = &connection.to;
+  let from_module_idx = conn_from.module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(conn_from.clone()))?;
+  let to_module_idx = conn_to.module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(conn_to.clone()))?;
   let from_module = find_module_by_name(modules, &graph.modules[from_module_idx]).ok_or(
     GraphBuilderError::ModuleNotFound(graph.modules[from_module_idx].clone()))?;
   let to_module = find_module_by_name(modules, &graph.modules[to_module_idx]).ok_or(
     GraphBuilderError::ModuleNotFound(graph.modules[to_module_idx].clone()))?;
   let (from_name, to_name, compatible_type) = only_matching_connection(from_module, to_module);
   let from_connection = graph.add_connection(from_name);
-  graph.connect(*conn_from, from_connection);
+  graph.connect(conn_from, &from_connection);
   let handle = graph.add_handle(&(from_module.name.to_string() + "-" + &from_name + "-" + &to_name + "-" + &to_module.name), compatible_type);
-  graph.connect(from_connection, handle);
+  graph.connect(&from_connection, &handle);
   let to_connection = graph.add_connection(to_name);
-  graph.connect(handle, to_connection);
-  graph.connect(to_connection, *conn_to);
+  graph.connect(&handle, &to_connection);
+  graph.connect(&to_connection, conn_to);
   Ok(())
 }

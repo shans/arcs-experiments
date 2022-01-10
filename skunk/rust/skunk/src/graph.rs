@@ -11,78 +11,81 @@ pub struct Handle {
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
-pub enum Endpoint {
+pub enum SimpleEndpoint {
   Module(usize),
   Connection(usize),
-  Handle(usize)
+  Handle(usize),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, PartialEq, Clone)]
+pub enum Endpoint {
+  Simple(SimpleEndpoint),
+  Tuple(Vec<SimpleEndpoint>),
+}
+
+#[derive(Copy, Clone)]
 pub enum EndpointSpec {
-  Specific(Endpoint),
+  Specific(SimpleEndpoint),
   AnyModule,
   AnyConnection,
   AnyHandle
 }
 
-impl Endpoint {
+impl SimpleEndpoint {
   fn matches_spec(&self, spec: EndpointSpec) -> bool {
     match spec {
-      EndpointSpec::AnyModule => if let Endpoint::Module(_idx) = self { true } else { false }
-      EndpointSpec::AnyConnection => if let Endpoint::Connection(_idx) = self { true } else { false }
-      EndpointSpec::AnyHandle => if let Endpoint::Handle(_idx) = self { true } else { false }
+      EndpointSpec::AnyModule => if let SimpleEndpoint::Module(_idx) = self { true } else { false }
+      EndpointSpec::AnyConnection => if let SimpleEndpoint::Connection(_idx) = self { true } else { false }
+      EndpointSpec::AnyHandle => if let SimpleEndpoint::Handle(_idx) = self { true } else { false }
       EndpointSpec::Specific(endpoint) => *self == endpoint
     }
   }
 
   pub fn module_idx(&self) -> Option<usize> {
-    if let Endpoint::Module(idx) = self { Some(*idx) } else { None }
+    if let SimpleEndpoint::Module(idx) = self { Some(*idx) } else { None }
   }
 
   pub fn connection_idx(&self) -> Option<usize> {
-    if let Endpoint::Connection(idx) = self { Some(*idx) } else { None }
+    if let SimpleEndpoint::Connection(idx) = self { Some(*idx) } else { None }
   }
 
   pub fn handle_idx(&self) -> Option<usize> {
-    if let Endpoint::Handle(idx) = self { Some(*idx) } else { None }
+    if let SimpleEndpoint::Handle(idx) = self { Some(*idx) } else { None }
+  }
+}
+
+impl Endpoint {
+  pub fn all(&self) -> &[SimpleEndpoint] {
+    match self {
+      Endpoint::Simple(e) => from_ref(e),
+      Endpoint::Tuple(es) => &es,
+    }
+  }
+  fn matches_spec(&self, spec: EndpointSpec) -> bool {
+    self.all().iter().any(|e| e.matches_spec(spec))
+  }
+
+  pub fn simple_endpoint(&self) -> Option<SimpleEndpoint> {
+    if let Endpoint::Simple(e) = self { Some(*e) } else { None }
+  }
+
+  pub fn module_idx(&self) -> Option<usize> {
+    self.simple_endpoint()?.module_idx()
+  }
+
+  pub fn connection_idx(&self) -> Option<usize> {
+    self.simple_endpoint()?.connection_idx()
+  }
+
+  pub fn handle_idx(&self) -> Option<usize> {
+    self.simple_endpoint()?.handle_idx()
   }
 }
 
 #[derive(Debug, PartialEq)]
-pub struct TransferArrow {
+pub struct Arrow {
   pub from: Endpoint,
   pub to: Endpoint,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct TupleStructureArrow {
-  pub from: Vec<Endpoint>,
-  pub to: Endpoint,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Arrow {
-  Transfer(TransferArrow),
-  TupleStructure(TupleStructureArrow),
-}
-
-impl Arrow {
-  pub fn from(&self) -> &[Endpoint] {
-    match self {
-      Arrow::Transfer(ta) => from_ref(&ta.from),
-      Arrow::TupleStructure(tsa) => &tsa.from,
-    }
-  }
-  pub fn to(&self) -> &[Endpoint] {
-    match self {
-      Arrow::Transfer(ta) => from_ref(&ta.to),
-      Arrow::TupleStructure(tsa) => from_ref(&tsa.to),
-    }
-  }
-}
-
-fn one_matches_spec(endpoints: &[Endpoint], spec: EndpointSpec) -> bool {
-  endpoints.iter().any(|e| e.matches_spec(spec))
 }
 
 #[derive(Debug)]
@@ -110,32 +113,36 @@ impl Graph {
       }
       ModuleSpecifier::Name(local_name) => idx = *self.names.get(local_name).unwrap()
     }
-    Endpoint::Module(idx)
+    Endpoint::Simple(SimpleEndpoint::Module(idx))
   }
 
   pub fn add_connection(&mut self, connection_name: &str) -> Endpoint {
     self.connections.push(connection_name.to_string());
-    Endpoint::Connection(self.connections.len() - 1)
+    Endpoint::Simple(SimpleEndpoint::Connection(self.connections.len() - 1))
   }
 
   pub fn add_handle(&mut self, handle_name: &str, handle_type: Type) -> Endpoint {
     self.handles.push(Handle { name: handle_name.to_string(), h_type: handle_type });
-    Endpoint::Handle(self.handles.len() - 1)
+    Endpoint::Simple(SimpleEndpoint::Handle(self.handles.len() - 1))
   }
 
-  pub fn connect(&mut self, from: Endpoint, to: Endpoint) -> usize {
-    self.assert_endpoint_is_valid(from);
-    self.assert_endpoint_is_valid(to);
+  pub fn connect(&mut self, from: &Endpoint, to: &Endpoint) -> usize {
+    assert!(self.endpoint_is_valid(from));
+    assert!(self.endpoint_is_valid(to));
     self.arrows.push(Arrow::new(from, to));
     self.arrows.len() - 1
   }
 
-  fn assert_endpoint_is_valid(&self, endpoint: Endpoint) {
+  fn simple_endpoint_is_valid(&self, endpoint: SimpleEndpoint) -> bool {
     match endpoint {
-      Endpoint::Module(idx) => assert!(idx < self.modules.len()),
-      Endpoint::Connection(idx) => assert!(idx < self.connections.len()),
-      Endpoint::Handle(idx) => assert!(idx < self.handles.len())
+      SimpleEndpoint::Module(idx) => idx < self.modules.len(),
+      SimpleEndpoint::Connection(idx) => idx < self.connections.len(),
+      SimpleEndpoint::Handle(idx) => idx < self.handles.len()
     }
+  }
+
+  fn endpoint_is_valid(&self, endpoint: &Endpoint) -> bool {
+    endpoint.all().iter().all(|e| self.simple_endpoint_is_valid(*e))
   }
 
   // Remove and return any arrows matching (from_spec -> to_spec).
@@ -144,7 +151,7 @@ impl Graph {
     let mut remaining = Vec::new();
     let mut returning = Vec::new();
     self.arrows.drain(..).for_each(|arrow| {
-      if one_matches_spec(arrow.from(), from_spec) && one_matches_spec(arrow.to(), to_spec) {
+      if arrow.from.matches_spec(from_spec) && arrow.to.matches_spec(to_spec) {
         returning.push(arrow);
       } else {
         remaining.push(arrow);
@@ -157,21 +164,21 @@ impl Graph {
   // Return any arrows matching (from_spec -> to_spec).
   // Note that this will pick up structure/destructure arrows where one endpoint matches from_spec or to_spec.
   pub fn arrows_matching(&self, from_spec: EndpointSpec, to_spec: EndpointSpec) -> Vec<&Arrow> {
-    self.arrows.iter().filter(|arrow| one_matches_spec(arrow.from(), from_spec) && one_matches_spec(arrow.to(), to_spec)).collect()
+    self.arrows.iter().filter(|arrow| arrow.from.matches_spec(from_spec) && arrow.to.matches_spec(to_spec)).collect()
   }
 
   // Return any arrows matching (endpoint -> spec) or (spec -> endpoint).
-  pub fn arrows_involving_endpoint(&self, endpoint: Endpoint, spec: EndpointSpec) -> Vec<&Arrow> {
+  pub fn arrows_involving_endpoint(&self, endpoint: SimpleEndpoint, spec: EndpointSpec) -> Vec<&Arrow> {
     let mut lhs = self.arrows_matching(EndpointSpec::Specific(endpoint), spec);
     lhs.append(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)));
     lhs
   }
 
   // Return all endpoints associated with spec matching (endpoing -> spec) or (spec -> endpoint)
-  pub fn endpoints_associated_with_endpoint(&self, endpoint: Endpoint, spec: EndpointSpec) -> Vec<&Endpoint> {
+  pub fn endpoints_associated_with_endpoint(&self, endpoint: SimpleEndpoint, spec: EndpointSpec) -> Vec<&Endpoint> {
     let lhs = self.arrows_matching(EndpointSpec::Specific(endpoint), spec);
-    let lhs = lhs.iter().map(|endpoint| endpoint.to());
-    lhs.chain(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)).iter().map(|endpoint| endpoint.from())).flatten().collect()
+    let lhs = lhs.iter().map(|endpoint| &endpoint.to);
+    lhs.chain(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)).iter().map(|endpoint| &endpoint.from)).collect()
   }
 
   pub fn filter_module_to_module_connections(&mut self) -> Vec<Arrow> {
@@ -180,8 +187,8 @@ impl Graph {
 }
 
 impl Arrow {
-  pub fn new(from: Endpoint, to: Endpoint) -> Arrow {
-    Arrow::Transfer(TransferArrow { from, to })
+  pub fn new(from: &Endpoint, to: &Endpoint) -> Arrow {
+    Arrow { from: from.clone(), to: to.clone() }
   }
 }
 
@@ -195,29 +202,29 @@ mod tests {
     let m0 = graph.add_module(&ModuleSpecifier::Module("mod1".to_string()));
     let m1 = graph.add_module(&ModuleSpecifier::Module("mod2".to_string()));
     let c0 = graph.add_connection("c0");
-    graph.connect(m0, m1);
-    graph.connect(m0, c0);
-    graph.connect(c0, m1);
+    graph.connect(&m0, &m1);
+    graph.connect(&m0, &c0);
+    graph.connect(&c0, &m1);
     
     let m2m = graph.filter_module_to_module_connections();
 
-    assert_eq!(m2m, vec!(Arrow::new(m0, m1)));
-    assert_eq!(graph.arrows, vec!(Arrow::new(m0, c0), Arrow::new(c0, m1)));
+    assert_eq!(m2m, vec!(Arrow::new(&m0, &m1)));
+    assert_eq!(graph.arrows, vec!(Arrow::new(&m0, &c0), Arrow::new(&c0, &m1)));
   }
 
   #[test]
   fn module_spec_matches_any_module() {
-    assert_eq!(Endpoint::Module(0).matches_spec(EndpointSpec::AnyModule), true);
-    assert_eq!(Endpoint::Module(10).matches_spec(EndpointSpec::AnyModule), true);
-    assert_eq!(Endpoint::Handle(0).matches_spec(EndpointSpec::AnyModule), false);
-    assert_eq!(Endpoint::Connection(0).matches_spec(EndpointSpec::AnyModule), false);
+    assert_eq!(SimpleEndpoint::Module(0).matches_spec(EndpointSpec::AnyModule), true);
+    assert_eq!(SimpleEndpoint::Module(10).matches_spec(EndpointSpec::AnyModule), true);
+    assert_eq!(SimpleEndpoint::Handle(0).matches_spec(EndpointSpec::AnyModule), false);
+    assert_eq!(SimpleEndpoint::Connection(0).matches_spec(EndpointSpec::AnyModule), false);
   }
 
   #[test]
   fn handle_spec_matches_any_handle() {
-    assert_eq!(Endpoint::Handle(0).matches_spec(EndpointSpec::AnyHandle), true);
-    assert_eq!(Endpoint::Handle(10).matches_spec(EndpointSpec::AnyHandle), true);
-    assert_eq!(Endpoint::Module(0).matches_spec(EndpointSpec::AnyHandle), false);
-    assert_eq!(Endpoint::Connection(0).matches_spec(EndpointSpec::AnyHandle), false);
+    assert_eq!(SimpleEndpoint::Handle(0).matches_spec(EndpointSpec::AnyHandle), true);
+    assert_eq!(SimpleEndpoint::Handle(10).matches_spec(EndpointSpec::AnyHandle), true);
+    assert_eq!(SimpleEndpoint::Module(0).matches_spec(EndpointSpec::AnyHandle), false);
+    assert_eq!(SimpleEndpoint::Connection(0).matches_spec(EndpointSpec::AnyHandle), false);
   }
 } 
