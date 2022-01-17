@@ -373,8 +373,17 @@ fn module_params(i: Span) -> ParseResult<Vec<ast::ValueParam>> {
 }
 
 fn module(i: Span) -> ParseResult<ast::Module> {
-  let (input, (_, _, name, _, params, _, _, handles, _, listeners, _, examples, _, _))
-    = tuple((tag("module"), multispace1, uppercase_name, multispace0, opt(terminated(module_params, multispace0)), char('{'), multispace0, handles, multispace0, listeners, multispace0, opt(examples), multispace0, char('}')))(i)?;
+  let (input, (_, name, params, _, handles, listeners, graphs, examples, _))
+    = tuple((tag("module"),
+            delimited(multispace1, uppercase_name, multispace0), 
+            opt(terminated(module_params, multispace0)),
+            char('{'),
+            preceded(multispace0, handles),
+            preceded(multispace0, listeners),
+            preceded(multispace0, module_graphs),
+            delimited(multispace0, opt(examples), multispace0),
+            char('}')
+          ))(i)?;
   let examples = match examples {
     None => ast::Examples { examples: Vec::new() },
     Some(e) => e
@@ -385,15 +394,12 @@ fn module(i: Span) -> ParseResult<ast::Module> {
   };
   Ok((
     input,
-    ast::Module {
-      name: name.to_string(),
-      handles,
-      listeners,
-      submodules: Vec::new(),
-      examples,
-      value_params: params,
-    }
+    ast::Module::create(name.fragment(), handles, listeners, Vec::new(), examples, params, graphs)
   ))
+}
+
+fn module_graphs(i: Span) -> ParseResult<Vec<ast::GraphDirective>> {
+  separated_list0(multispace1, graph)(i)
 }
 
 fn graph_module_specifier(i: Span) -> ParseResult<ast::GraphModuleInfo> {
@@ -606,9 +612,9 @@ mod tests {
 }";
 
   fn test_module_result<'a>(offset: usize, line: u32) -> ast::Module {
-    ast::Module {
-      name: String::from("TestModule"),
-      handles: vec!(
+    ast::Module::create(
+      "TestModule", 
+      vec!(
         ast::Handle {
           position: ast::SafeSpan { offset: 22 + offset, line: 1 + line },
           name: "foo".to_string(), 
@@ -616,13 +622,14 @@ mod tests {
           h_type: ast::Type::Int 
         }
       ),
-      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation:
+      vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation:
         Expr::output(offset + 62, line + 2, "bar", Expr::fun(7, 0, "far", Expr::sref(4, 0, "la"))).build()
       }), 
-      submodules: Vec::new(),
-      examples: ast::Examples { examples: Vec::new() },
-      value_params: Vec::new(),
-    }
+      Vec::new(),
+      ast::Examples { examples: Vec::new() },
+      Vec::new(),
+      Vec::new(),
+    )
   }
 
   static TEST_GRAPH_STRING : &str = "MyModule -> MyModule2 -> AnotherModule;";

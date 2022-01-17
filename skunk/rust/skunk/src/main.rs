@@ -96,7 +96,7 @@ impl FileData {
     if remainder.fragment().len() > 0 {
       println!("Left over: {}", remainder);
     }
-
+    
     self.ast = ast;
     let ast_graphs = ast::graphs(&self.ast);
     let modules = ast::modules(&self.ast);
@@ -105,12 +105,23 @@ impl FileData {
 
       graph_builder::resolve_graph(&modules, &mut graph)?;
 
-      let main = graph_to_module::graph_to_module(graph, modules, "Main")?;
+      let mut main = ast::Module::create("Main", Vec::new(), Vec::new(), Vec::new(), ast::Examples { examples: Vec::new() }, Vec::new(), Vec::new());
+      graph_to_module::graph_to_module(&mut main, graph, modules, "Main")?;
       self.main_module = Some(main);
     } else if modules.len() == 1 {
       // TODO: This isn't really correct - there needs to be some way
       // of determining which module is "main".
       self.main_module = Some(modules[0].clone());
+    } else {
+      let slash_pos = location.rfind('/');
+      // TODO: This maybe assumes ASCII (byte boundary == character boundary)
+      let module_name = match slash_pos {
+        None => location,
+        Some(pos) => location.split_at(pos + 1).1,
+      };
+      let module_name = module_name.strip_suffix(".skunk").unwrap();
+      dbg!(&module_name);
+      self.main_module = modules.iter().find(|module| module.name == module_name).map(|module| (*module).clone())
     }
     Ok(())
   }

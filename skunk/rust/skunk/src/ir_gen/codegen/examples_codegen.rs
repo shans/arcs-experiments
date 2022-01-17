@@ -268,19 +268,20 @@ pub fn main_for_examples<'ctx>(context: &'ctx Context, target_machine: &TargetMa
 
   for submodule in modules {
     let fn_name = submodule.get_name().to_str().unwrap().to_string() + "_run_examples";
-    let sub_fn = submodule.get_function(&fn_name).unwrap();
-    let sub_fn = cg.module.add_function(&fn_name, sub_fn.get_type(), None);
-    let result = cg.builder.build_call(sub_fn, &[], "result").try_as_basic_value().left().unwrap().into_int_value();
-    let bad_result = context.append_basic_block(function, &(fn_name.clone() + "_bad"));
-    let next = context.append_basic_block(function, &(fn_name + "_next"));
+    if let Some(sub_fn) = submodule.get_function(&fn_name) {
+      let sub_fn = cg.module.add_function(&fn_name, sub_fn.get_type(), None);
+      let result = cg.builder.build_call(sub_fn, &[], "result").try_as_basic_value().left().unwrap().into_int_value();
+      let bad_result = context.append_basic_block(function, &(fn_name.clone() + "_bad"));
+      let next = context.append_basic_block(function, &(fn_name + "_next"));
 
-    let test = cg.builder.build_int_compare(IntPredicate::EQ, result, context.i64_type().const_zero(), "test");
-    cg.builder.build_conditional_branch(test, next, bad_result);
+      let test = cg.builder.build_int_compare(IntPredicate::EQ, result, context.i64_type().const_zero(), "test");
+      cg.builder.build_conditional_branch(test, next, bad_result);
 
-    cg.builder.position_at_end(bad_result);
-    cg.builder.build_return(Some(&context.i32_type().const_int(-(1 as i32) as u64, true)));
-    
-    cg.builder.position_at_end(next);
+      cg.builder.position_at_end(bad_result);
+      cg.builder.build_return(Some(&context.i32_type().const_int(-(1 as i32) as u64, true)));
+      
+      cg.builder.position_at_end(next);
+    }
   }
 
   cg.builder.build_return(Some(&context.i32_type().const_zero()));

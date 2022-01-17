@@ -46,6 +46,16 @@ pub fn add_graph_module_info(graph: &mut graph::Graph, info: &ast::GraphModuleIn
       }).collect();
       graph::Endpoint::Tuple(simple_endpoints)
     }
+    ast::GraphModuleInfo::Field(specifier, h_name) => {
+      if specifier == &ast::ModuleSpecifier::This {
+        // TODO: Need to plumb module info through so that types can be determined
+        // though actually, it's resolve that does that. So maybe we need a special
+        // Unresolved type to signify we still need to do some work?
+        graph.add_handle(h_name, ast::Type::Int)
+      } else {
+        todo!("can't add fields that aren't This.fields yet")
+      }
+    }
     _ => todo!("can't add {:?} to a graph yet", info)
   }
 }

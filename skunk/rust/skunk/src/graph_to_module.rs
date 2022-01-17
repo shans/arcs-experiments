@@ -39,7 +39,7 @@ pub struct HandleInfo {
   pub submodule_handle: String
 }
 
-pub fn graph_to_module(graph: graph::Graph, modules: Vec<&ast::Module>, name: &str) -> Result<ast::Module, GraphToModuleError> {
+pub fn graph_to_module(module: &mut ast::Module, graph: graph::Graph, modules: Vec<&ast::Module>, name: &str) -> Result<(), GraphToModuleError> {
   let module_context = ModuleContext::new(graph, modules)?;
   let mut handle_infos = module_context.generate_handles()?;
   let mut submodules: Vec<ast::ModuleInfo> = module_context.submodules().drain(..).map(|module| ast::ModuleInfo { module, handle_map: HashMap::new() }).collect();
@@ -50,7 +50,10 @@ pub fn graph_to_module(graph: graph::Graph, modules: Vec<&ast::Module>, name: &s
   }
   let listeners = module_context.generate_listeners(&handle_infos);
   let handles = handle_infos.drain(..).map(|info| info.handle).collect();
-  Ok(ast::Module { name: name.to_string(), handles, listeners, submodules, examples: ast::Examples { examples: Vec::new() }, value_params: Vec::new() })
+  module.handles = handles;
+  module.listeners = listeners;
+  module.submodules = submodules;
+  Ok(())
 }
 
 pub struct ModuleContext<'a> {

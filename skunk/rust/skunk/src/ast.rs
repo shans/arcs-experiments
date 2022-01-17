@@ -359,6 +359,7 @@ pub struct Module {
   pub submodules: Vec<ModuleInfo>,
   pub examples: Examples,
   pub value_params: Vec<ValueParam>,
+  pub graph: Vec<GraphDirective>,
 }
 
 impl Module {
@@ -399,9 +400,21 @@ impl Module {
       None
     } 
   }
+
+  pub fn create(
+    name: &str, 
+    handles: Vec<Handle>, 
+    listeners: Vec<Listener>, 
+    submodules: Vec<ModuleInfo>, 
+    examples: Examples, 
+    value_params: Vec<ValueParam>,
+    graph: Vec<GraphDirective>
+  ) -> Self {
+    Module { name: name.to_string(), handles, listeners, submodules, examples, value_params, graph }
+  }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum ModuleSpecifier {
   This,
   Module(String),
@@ -410,7 +423,7 @@ pub enum ModuleSpecifier {
   Name(String),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum GraphModuleInfo {
   Module(ModuleSpecifier),
   Field(ModuleSpecifier, String),
@@ -426,7 +439,7 @@ impl GraphModuleInfo {
   }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum GraphDirective {
   Chain(Vec<GraphModuleInfo>),
 }

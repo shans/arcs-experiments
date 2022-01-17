@@ -1,7 +1,7 @@
 use inkwell::{AddressSpace, IntPredicate};
 use inkwell::basic_block::BasicBlock;
 use inkwell::types::{StructType, BasicTypeEnum, BasicType};
-use inkwell::values::{BasicValueEnum, IntValue, PointerValue, PhiValue, FunctionValue};
+use inkwell::values::{BasicValueEnum, IntValue, PointerValue, PhiValue, StructValue};
 
 use super::codegen_state::*;
 use super::ast;
@@ -11,13 +11,13 @@ use super::codegen::*;
 use std::convert::TryInto;
 
 //
-// Each field in a module's state has a type (currently SingleWordPrimitive or MemRegion).
+// Each field in a module's state has a type (currently SimplePrimitive or MemRegion).
 // 
 // The simplest encoding of a state field is a pointer to that field's first word.
 // Methods like update_ptr_for_field, read_ptr_for_field, etc. generate the 
 // appropriate pointer given a module and a field name.
 //
-// Generic pointers can be used directly to read single-word values (e.g. SingleWordPrimitives).
+// Generic pointers can be used directly to read single-word values (e.g. SimplePrimitives).
 // They can also be used to construct more complex pointers (e.g. MemRegionPointer)
 // for fine-grained access to multi-word values.
 //
@@ -64,8 +64,10 @@ pub enum TypePrimitive {
 // between pointers, and how to inflate from a pointer to a StateValue
 #[derive(PartialEq, Debug)]
 pub enum PointerKind {
-  // Pointers 1 word or smaller; the actual size is given by the LLVM pointer type used
-  SingleWordPrimitive,
+  // Pointers to single values of size 1 word or smaller; the actual size is given by the LLVM pointer type used
+  SimplePrimitive,
+  // Pointers to multiple primitives encoded in 1 or more words; the actual size is given by the LLVM pointer type used.
+  CompoundPrimitive,
   // A dynamically (runtime) sized region of heap (or whatever). The value is 2 words big: (data_ptr, size)
   DynamicMemRegion,
   // A statically sized region of heap (or whatever). Size is given by type.
@@ -115,10 +117,10 @@ pub fn type_primitive_for_type(h_type: &ast::Type) -> Vec<TypePrimitive> {
 
 pub fn pointer_kind_for_type_primitive(primitive: &Vec<TypePrimitive>) -> PointerKind {
   if primitive.len() != 1 {
-    panic!("Don't yet know how to deal with aggregate toplevel type primitives");
+    return PointerKind::CompoundPrimitive;
   }
   match &primitive[0] {
-    TypePrimitive::Int | TypePrimitive::Char | TypePrimitive::Bool => PointerKind::SingleWordPrimitive,
+    TypePrimitive::Int | TypePrimitive::Char | TypePrimitive::Bool => PointerKind::SimplePrimitive,
     TypePrimitive::MemRegion => PointerKind::DynamicMemRegion,
     TypePrimitive::DynamicArrayOf(_x) => PointerKind::DynamicMemRegion,
     TypePrimitive::FixedArrayOf(_x, _s) => PointerKind::StaticMemRegion,
@@ -139,9 +141,13 @@ impl <'ctx> StatePointer<'ctx> {
   }
   pub fn load(&self, cg: &CodegenState<'ctx>, name: &str) -> CodegenResult<StateValue<'ctx>> {
     match self.pointer_kind {
-      PointerKind::SingleWordPrimitive => {
+      PointerKind::SimplePrimitive => {
         let value = cg.builder.build_load(self.pointer.into_pointer_value(), name);
-        Ok(StateValue { value: ValueParts::SingleWordPrimitive(value), value_type: self.pointer_type.clone() })
+        Ok(StateValue { value: ValueParts::SimplePrimitive(value), value_type: self.pointer_type.clone() })
+      }
+      PointerKind::CompoundPrimitive => {
+        let value = cg.builder.build_load(self.pointer.into_pointer_value(), name);
+        Ok(StateValue { value: ValueParts::CompoundPrimitive(value.into_struct_value()), value_type: self.pointer_type.clone() })
       }
       PointerKind::StaticMemRegion => {
         let value = cg.builder.build_load(self.pointer.into_pointer_value(), name);
@@ -153,7 +159,7 @@ impl <'ctx> StatePointer<'ctx> {
         Ok(StateValue { value: ValueParts::DynamicMemRegion(data, size), value_type: self.pointer_type.clone() })
       }
       PointerKind::ConstPointer => {
-        Ok(StateValue { value: ValueParts::SingleWordPrimitive(self.pointer), value_type: self.pointer_type.clone() })
+        Ok(StateValue { value: ValueParts::SimplePrimitive(self.pointer), value_type: self.pointer_type.clone() })
       }
     }
   }
@@ -162,8 +168,19 @@ impl <'ctx> StatePointer<'ctx> {
   // immediate value) after an update has been applied.
   pub fn clear_update_pointer(&self, cg: &CodegenState<'ctx>) -> CodegenStatus {
     match self.pointer_kind {
-      PointerKind::SingleWordPrimitive => {
+      PointerKind::SimplePrimitive => {
         cg.builder.build_store(self.pointer.into_pointer_value(), cg.uint_const(0));
+        Ok(())
+      }
+      PointerKind::CompoundPrimitive => {
+        let ptr = self.pointer.into_pointer_value();
+        let mut pos = 0;
+        for sub_type in &self.pointer_type {
+          let sub_ptr = cg.builder.build_struct_gep(ptr, pos, &format!("sub_ptr{}", pos)).or(Err(CodegenError::InvalidStructPointer("weirdness deconstructing compound primitive".to_string())))?;
+          let sub_state_ptr = StatePointer::new_from_type_primitive(sub_ptr, vec!(sub_type.clone()));
+          sub_state_ptr.clear_update_pointer(cg);
+          pos += 1;
+        }
         Ok(())
       }
       PointerKind::StaticMemRegion => {
@@ -195,7 +212,8 @@ impl <'ctx> StatePointer<'ctx> {
 pub enum ValueParts<'ctx> {
   None,
   Suppress, // used to indicate a known terminated code-flow
-  SingleWordPrimitive(BasicValueEnum<'ctx>),
+  SimplePrimitive(BasicValueEnum<'ctx>),
+  CompoundPrimitive(StructValue<'ctx>),
   DynamicMemRegion(PointerValue<'ctx>, IntValue<'ctx>),
   StaticMemRegion(PointerValue<'ctx>)
 }
@@ -223,7 +241,7 @@ impl <'ctx> StateValue<'ctx> {
     StateValue::new_prim_of_type(value.into(), vec!(TypePrimitive::Char))
   }
   pub fn new_prim_of_type(value: BasicValueEnum<'ctx>, value_type: Vec<TypePrimitive>) -> Self {
-    StateValue { value: ValueParts::SingleWordPrimitive(value), value_type }
+    StateValue { value: ValueParts::SimplePrimitive(value), value_type }
   }
   pub fn new_dynamic_mem_region_of_type(data: PointerValue<'ctx>, size: IntValue<'ctx>, value_type: Vec<TypePrimitive>) -> Self {
     StateValue { value: ValueParts::DynamicMemRegion(data, size), value_type }
@@ -250,7 +268,7 @@ impl <'ctx> StateValue<'ctx> {
   }
 
   pub fn into_int_value(&self) -> CodegenResult<IntValue<'ctx>> {
-    if let ValueParts::SingleWordPrimitive(v) = self.value {
+    if let ValueParts::SimplePrimitive(v) = self.value {
       Ok(v.into_int_value())
     } else {
       Err(CodegenError::TypeMismatch(std::format!("can't into_int_value() on ${:?}", self)))
@@ -266,7 +284,8 @@ impl <'ctx> StateValue<'ctx> {
 
   pub fn llvm_type(&self) -> BasicTypeEnum<'ctx> {
     match self.value {
-      ValueParts::SingleWordPrimitive(value) => value.get_type(),
+      ValueParts::SimplePrimitive(value) => value.get_type(),
+      ValueParts::CompoundPrimitive(value) => value.get_type().into(),
       ValueParts::DynamicMemRegion(ptr, _) | ValueParts::StaticMemRegion(ptr) => ptr.get_type().into(),
       ValueParts::None | ValueParts::Suppress => panic!("dunno!"),
     }
@@ -306,7 +325,7 @@ impl <'ctx> StateValue<'ctx> {
 
   pub fn debug(&self, cg: &mut CodegenState<'ctx>, printer: &mut dyn Printer<'ctx>) -> CodegenStatus {
     match self.value {
-      ValueParts::SingleWordPrimitive(v) => {
+      ValueParts::SimplePrimitive(v) => {
         let value_type = self.only_value_type()?;
         match value_type {
           TypePrimitive::Int => {
@@ -321,6 +340,16 @@ impl <'ctx> StateValue<'ctx> {
           }
           _ => todo!("Implement debug for {:?}", value_type)
         }
+      }
+      ValueParts::CompoundPrimitive(v) => {
+        // we need a pointer to the primitive - make an alloca and store into it
+        // TODO: there has to be a better way of doing this - we're literally copying the value into
+        // new memory in order to read it.
+        // Maybe carry the pointer in the StateValue? 
+        let alloca = cg.builder.build_alloca(v.get_type(), "temp_alloca");
+        cg.builder.build_store(alloca, v);
+        let tmp_sv = StateValue::new_static_mem_region_of_type(alloca, vec!(TypePrimitive::PointerTo(self.value_type.clone())));
+        tmp_sv.debug(cg, printer)
       }
       ValueParts::DynamicMemRegion(data, size) => {
         // TODO: this is only correct if an array of Char
@@ -355,12 +384,21 @@ impl <'ctx> StateValue<'ctx> {
       return Err(CodegenError::TypeMismatch("Attempt to store value into mismatched pointer".to_string()));
     }
     match self.value {
-      ValueParts::SingleWordPrimitive(v) => {
-        if ptr.pointer_kind == PointerKind::SingleWordPrimitive {
+      ValueParts::SimplePrimitive(v) => {
+        if ptr.pointer_kind == PointerKind::SimplePrimitive {
           cg.builder.build_store(ptr.pointer.into_pointer_value(), v);
           Ok(())
         } else {
-          Err(CodegenError::TypeMismatch("Attempt to store integer into non-integer pointer".to_string()))
+          Err(CodegenError::TypeMismatch("Attempt to store simple value into non-simple pointer".to_string()))
+        }
+      }
+      ValueParts::CompoundPrimitive(v) => {
+        if ptr.pointer_kind == PointerKind::CompoundPrimitive {
+          // this is multi-word, does it work?
+          cg.builder.build_store(ptr.pointer.into_pointer_value(), v);
+          Ok(())
+        } else {
+          Err(CodegenError::TypeMismatch("Attempt to store compound value into non-compound pointer".to_string()))
         }
       }
       ValueParts::DynamicMemRegion(data, size) => {
@@ -393,11 +431,11 @@ impl <'ctx> StateValue<'ctx> {
     // directly computed memrange values. Probably requires being able to represent pointers
     // as values, and may not be useful.
     match self.value {
-      ValueParts::SingleWordPrimitive(_v) => Err(CodegenError::InvalidFunctionArgument("Can't call size() on SingleWordPrimitive result".to_string())),
+      ValueParts::SimplePrimitive(_v) => Err(CodegenError::InvalidFunctionArgument("Can't call size() on SimplePrimitive result".to_string())),
       ValueParts::DynamicMemRegion(_data, size) => {
         Ok(StateValue::new_int(size))
       }
-      ValueParts::StaticMemRegion(_data) => Ok(StateValue::new_int(cg.uint_const(type_size(&self.value_type)))),
+      ValueParts::StaticMemRegion(_) | ValueParts::CompoundPrimitive(_) => Ok(StateValue::new_int(cg.uint_const(type_size(&self.value_type)))),
       ValueParts::None => Err(CodegenError::InvalidFunctionArgument("Can't call size() on None result".to_string())),
       ValueParts::Suppress => panic!("Attempting to size a known-terminated code flow"),
     }

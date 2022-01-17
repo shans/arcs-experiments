@@ -384,32 +384,37 @@ mod tests {
   use super::super::super::parser;
 
   pub fn test_module<'a>() -> ast::Module {
-    ast::Module {
-      name: String::from("TestModule"),
-      handles: vec!(ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "foo".to_string(), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
-                    ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "far".to_string(), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
-                    ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "bar".to_string(), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
-                  ),
-      listeners: vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: 
-        ast::Expression::output(ast::SafeSpan { offset: 0, line: 1 }, "bar", ast::Expression::state_reference(ast::SafeSpan { offset: 0, line: 1 }, "far"), false).value,
-      }),
-      submodules: Vec::new(),
-      examples: ast::Examples { examples: Vec::new() },
-      value_params: Vec::new(),
-    }
+    ast::Module::create( 
+      "TestModule",
+      vec!(
+        ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "foo".to_string(), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int },
+        ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "far".to_string(), usages: vec!(ast::Usage::Read), h_type: ast::Type::Int },
+        ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "bar".to_string(), usages: vec!(ast::Usage::Write), h_type: ast::Type::Int }
+      ),
+      vec!(
+        ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: 
+          ast::Expression::output(ast::SafeSpan { offset: 0, line: 1 }, "bar", ast::Expression::state_reference(ast::SafeSpan { offset: 0, line: 1 }, "far"), false).value,
+        }
+      ),
+      Vec::new(),
+      ast::Examples { examples: Vec::new() },
+      Vec::new(),
+      Vec::new(),
+    )
   }
 
   fn invalid_module<'a>() -> ast::Module {
-     ast::Module {
-      name: String::from("InvalidModule"),
-      handles: vec!(ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "foo".to_string(), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
-      listeners: vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, implementation:
+     ast::Module::create(
+      "InvalidModule",
+      vec!(ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: "foo".to_string(), usages: vec!(ast::Usage::Read, ast::Usage::Write), h_type: ast::Type::Int }),
+      vec!(ast::Listener { trigger: String::from("invalid"), kind: ast::ListenerKind::OnChange, implementation:
         ast::Expression::output(ast::SafeSpan { offset: 0, line: 1 }, "foo", ast::Expression::state_reference(ast::SafeSpan { offset: 0, line: 1 }, "foo"), false).value,
       }),
-      submodules: Vec::new(),
-      examples: ast::Examples { examples: Vec::new() },
-      value_params: Vec::new(),
-    }
+      Vec::new(),
+      ast::Examples { examples: Vec::new() },
+      Vec::new(),
+      Vec::new(),
+    )
   }
 
   #[test]
