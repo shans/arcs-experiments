@@ -70,8 +70,15 @@ pub fn find_module_by_name<'a>(modules: &Vec<&'a ast::Module>, name: &str) -> Op
   modules.iter().find(|&&module| module.name == name).map(|module| *module)
 }
 
+// Eventually this should compare a 'from' type to a 'to' type - i.e. write -> read
 fn types_match(left: &ast::Handle, right: &ast::Handle) -> bool {
   left.h_type == right.h_type
+}
+
+// Eventually this should indicate if the super type encapsulates the sub_type (e.g. if the super_type is a more
+// general type that can be used in place of the sub_type)
+pub fn type_encapsulates(super_type: &ast::Handle, sub_type: &ast::Handle) -> bool {
+  super_type.h_type == sub_type.h_type
 }
 
 fn matching_connections<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast::Module) -> Vec<(&'a str, &'b str, ast::Type)> {

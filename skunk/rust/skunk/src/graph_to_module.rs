@@ -6,7 +6,8 @@ use super::*;
 pub enum GraphToModuleError {
   NameNotInModuleList(String),
   NameNotInHandleList(ast::Module, String),
-  MultipleModulesForConnection(String)
+  MultipleModulesForConnection(String),
+  InvalidHandleType(String),
 }
 
 #[derive(Debug)]
@@ -48,11 +49,23 @@ pub fn graph_to_module(module: &mut ast::Module, graph: graph::Graph, modules: V
       submodules[idx.submodule_idx].handle_map.insert(idx.submodule_handle.clone(), handle_info.handle.name.clone());
     }
   }
-  let listeners = module_context.generate_listeners(&handle_infos);
-  let handles = handle_infos.drain(..).map(|info| info.handle).collect();
-  module.handles = handles;
-  module.listeners = listeners;
-  module.submodules = submodules;
+  let mut listeners = module_context.generate_listeners(&handle_infos);
+  let mut error: Option<GraphToModuleError> = None;
+  handle_infos.drain(..).for_each(|info| {
+    let existing_handle = module.handle_for_field(&info.handle.name);
+    if let Some(handle) = existing_handle {
+      if !graph_builder::type_encapsulates(handle, &info.handle) {
+        error = Some(GraphToModuleError::InvalidHandleType(info.handle.name.clone()))
+      }
+    } else {
+      module.handles.push(info.handle);
+    }
+  });
+  if let Some(err) = error {
+    return Err(err);
+  }
+  module.listeners.append(&mut listeners);
+  module.submodules.append(&mut submodules);
   Ok(())
 }
 
