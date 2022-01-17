@@ -465,6 +465,15 @@ pub fn modules(ast: &Vec<TopLevel>) -> Vec<&Module> {
   }).collect()
 }
 
+pub fn modules_mut(ast: &mut Vec<TopLevel>) -> Vec<&mut Module> {
+  ast.iter_mut().filter_map(|top_level| {
+    match top_level {
+      TopLevel::Module(m) => Some(m),
+      _ => None
+    }
+  }).collect()
+}
+
 pub fn graphs(ast: &Vec<TopLevel>) -> Vec<&GraphDirective> {
   ast.iter().filter_map(|top_level| {
     match top_level {

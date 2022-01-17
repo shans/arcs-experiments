@@ -84,7 +84,7 @@ impl FileData {
     let mut f = File::open(location).or(Err(SkunkError::FileNotFound))?;
     f.read_to_string(&mut self.buffer).or(Err(SkunkError::FileUnreadable))?;
 
-    let (remainder, ast) = match parser::parse(&self.buffer) {
+    let (remainder, mut ast) = match parser::parse(&self.buffer) {
       Ok(result) => result,
       Err(Err::Failure(e) | Err::Error(e)) => { 
         println!("{}", e);
@@ -96,22 +96,38 @@ impl FileData {
     if remainder.fragment().len() > 0 {
       println!("Left over: {}", remainder);
     }
-    
+   
+    let mut processed_modules = Vec::new();
+    { 
+      let mut modules = ast::modules_mut(&mut ast);
+      for i in 0..modules.len() {
+        if modules[i].graph.len() > 0 {
+          let mut graph = graph_builder::make_graph(modules[i].graph.iter().collect());
+          let processed_refs = processed_modules.iter().collect();
+          graph_builder::resolve_graph(&processed_refs, &mut graph)?;
+          graph_to_module::graph_to_module(modules[i], graph, processed_refs, "")?;
+        }
+        processed_modules.push(modules[i].clone())
+      }
+    }
     self.ast = ast;
     let ast_graphs = ast::graphs(&self.ast);
-    let modules = ast::modules(&self.ast);
+    let processed_refs = processed_modules.iter().collect();
+
+    // TODO: Instead of duplicating graph processing logic, push the main module onto the end of the mutable modules list and
+    // deal with it in the same pass as the rest.
     if ast_graphs.len() > 0 {
       let mut graph = graph_builder::make_graph(ast::graphs(&self.ast));
 
-      graph_builder::resolve_graph(&modules, &mut graph)?;
+      graph_builder::resolve_graph(&processed_refs, &mut graph)?;
 
       let mut main = ast::Module::create("Main", Vec::new(), Vec::new(), Vec::new(), ast::Examples { examples: Vec::new() }, Vec::new(), Vec::new());
-      graph_to_module::graph_to_module(&mut main, graph, modules, "Main")?;
+      graph_to_module::graph_to_module(&mut main, graph, processed_refs, "Main")?;
       self.main_module = Some(main);
-    } else if modules.len() == 1 {
+    } else if processed_refs.len() == 1 {
       // TODO: This isn't really correct - there needs to be some way
       // of determining which module is "main".
-      self.main_module = Some(modules[0].clone());
+      self.main_module = Some(processed_refs[0].clone());
     } else {
       let slash_pos = location.rfind('/');
       // TODO: This maybe assumes ASCII (byte boundary == character boundary)
@@ -121,7 +137,7 @@ impl FileData {
       };
       let module_name = module_name.strip_suffix(".skunk").unwrap();
       dbg!(&module_name);
-      self.main_module = modules.iter().find(|module| module.name == module_name).map(|module| (*module).clone())
+      self.main_module = processed_refs.iter().find(|module| module.name == module_name).map(|module| (*module).clone())
     }
     Ok(())
   }
