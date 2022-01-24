@@ -1,0 +1,36 @@
+uses UnsignedInt;
+uses Spaces;
+
+type Error = Int;
+
+module Char<char: Char> {
+  input: reads (String, Int);
+  output: writes (String, Int);
+  error: writes Error;
+
+  input.onChange: {
+    if input.0[input.1] == char {
+      output <- (input.0, input.1 + 1);
+    }
+    error <- 1;
+  }
+
+  examples {
+    char: 'a', !input: ("aa", 0) -> output: ("aa", 1);
+  }
+}
+
+module Pair {
+  input: reads (String, Int);
+  output: writes (String, Int);
+  result: writes (Int, Int);
+  error: writes Error;
+
+  $a:UnsignedInt -> Spaces -> $b:UnsignedInt;
+  ($a, $b) -> result;
+
+  examples {
+    !input: ("3 4", 0) -> result: (3, 4);
+    !input: ("3 hat", 0) -> error: 1;
+  }
+}

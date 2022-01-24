@@ -74,7 +74,8 @@ impl <'ctx> DebugState<'ctx> {
   }
 
   fn get_printf(&self, cg: &mut CodegenState<'ctx>) -> FunctionValue<'ctx> {
-    cg.module.get_function("_printf").or_else(|| {
+    let name = format!("_{}_printf", cg.module.get_name().to_str().unwrap());
+    cg.module.get_function(&name).or_else(|| {
       let current_pos = cg.builder.get_insert_block();
       let printf = self.generate_printf(cg).unwrap();
       if let Some(block) = current_pos {
@@ -94,9 +95,13 @@ impl <'ctx> DebugState<'ctx> {
   // }
   // position = position + potentially_written
   // !! store position in struct
+  //
+  // TODO: make this take the rest of the state as arguments and make it generic across modules.
+  // It's quite wrong at the moment..
   fn generate_printf(&self, cg: &mut CodegenState<'ctx>) -> CodegenResult<FunctionValue<'ctx>> {
     let function_type = cg.context.void_type().fn_type(&[DebugState::llvm_type(cg).into(), cg.char_ptr_type().into()], true);
-    let function = cg.module.add_function("_printf", function_type, None);
+    let name = format!("_{}_printf", cg.module.get_name().to_str().unwrap());
+    let function = cg.module.add_function(&name, function_type, None);
     let block = cg.context.append_basic_block(function, "entry");
     cg.builder.position_at_end(block);
 

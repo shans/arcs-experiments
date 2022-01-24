@@ -83,9 +83,23 @@ impl Endpoint {
 }
 
 #[derive(Debug, PartialEq)]
+pub enum ArrowInfo {
+  None,
+  // ArrowInfo::TupleConstructor is used after a tuple arrow is deconstructed
+  // into simple arrows - each simple arrow is tagged with TupleConstructor
+  // to indicate its role.
+  // Need a unique ID that characterizes the original arrow (so that if there
+  // are multiple TupleConstructors pointing to the same tuple, they can be
+  // distinguished), and the constructing index (i.e. which part of the tuple
+  // is built by this arrow)
+  TupleConstructor(usize, usize)
+}
+
+#[derive(Debug, PartialEq)]
 pub struct Arrow {
   pub from: Endpoint,
   pub to: Endpoint,
+  pub info: ArrowInfo
 }
 
 #[derive(Debug)]
@@ -133,6 +147,13 @@ impl Graph {
     self.arrows.len() - 1
   }
 
+  pub fn connect_tuple_constructor(&mut self, from: &Endpoint, to: &Endpoint, uid: usize, idx: usize) -> usize {
+    assert!(self.endpoint_is_valid(from));
+    assert!(self.endpoint_is_valid(to));
+    self.arrows.push(Arrow::new_with_info(from, to, ArrowInfo::TupleConstructor(uid, idx)));
+    self.arrows.len() - 1
+  }
+
   fn simple_endpoint_is_valid(&self, endpoint: SimpleEndpoint) -> bool {
     match endpoint {
       SimpleEndpoint::Module(idx) => idx < self.modules.len(),
@@ -174,21 +195,30 @@ impl Graph {
     lhs
   }
 
-  // Return all endpoints associated with spec matching (endpoing -> spec) or (spec -> endpoint)
-  pub fn endpoints_associated_with_endpoint(&self, endpoint: SimpleEndpoint, spec: EndpointSpec) -> Vec<&Endpoint> {
+  /** 
+   * Return all endpoints associated with spec matching (endpoing -> spec) or (spec -> endpoint)
+   */
+  pub fn endpoints_associated_with_endpoint(&self, endpoint: SimpleEndpoint, spec: EndpointSpec) -> Vec<(&Endpoint, &Arrow)> {
     let lhs = self.arrows_matching(EndpointSpec::Specific(endpoint), spec);
-    let lhs = lhs.iter().map(|endpoint| &endpoint.to);
-    lhs.chain(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)).iter().map(|endpoint| &endpoint.from)).collect()
+    let lhs = lhs.iter().map(|endpoint| (&endpoint.to, *endpoint));
+    lhs.chain(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)).iter().map(|endpoint| (&endpoint.from, *endpoint))).collect()
   }
 
   pub fn filter_module_to_module_connections(&mut self) -> Vec<Arrow> {
     self.filter_arrows(EndpointSpec::AnyModule, EndpointSpec::AnyModule)
   }
+
+  pub fn filter_module_to_handle_connections(&mut self) -> Vec<Arrow> {
+    self.filter_arrows(EndpointSpec::AnyModule, EndpointSpec::AnyHandle)
+  }
 }
 
 impl Arrow {
   pub fn new(from: &Endpoint, to: &Endpoint) -> Arrow {
-    Arrow { from: from.clone(), to: to.clone() }
+    Arrow { from: from.clone(), to: to.clone(), info: ArrowInfo::None }
+  }
+  pub fn new_with_info(from: &Endpoint, to: &Endpoint, info: ArrowInfo) -> Arrow {
+    Arrow { from: from.clone(), to: to.clone(), info }
   }
 }
 

@@ -160,7 +160,7 @@ pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Modul
     ast::ExpressionValueEnum::Tuple(entries) => {
       // TODO: this won't deal with inlined tuples; will need to create a new StateValue type for those.
       let tuple_type = expression_type(cg, module, expression)?;
-      let tuple_ptr = StateValue::new_tuple(cg, tuple_type)?;
+      let mut tuple_ptr = StateValue::new_tuple(cg, tuple_type)?;
       for (idx, entry) in entries.iter().enumerate() {
         let value = expression_codegen(cg, module, state_alloca, entry)?;
         tuple_ptr.set_tuple_index(cg, idx as u32, value)?;
@@ -210,7 +210,37 @@ pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Modul
           _ => todo!("Operator {:?} not yet implemented", op)
         }
       }
-    }
+    },
+    ast::ExpressionValueEnum::WriteToTuple(write_to_tuple) => {
+      let state_ptr = cg.builder.build_load(state_alloca, "state_ptr").into_pointer_value();
+      let tuple_field_ptr = cg.module_tuple_field_ptr(module, state_ptr)?;
+      let tuple_offset = module.offset_for_tuple(write_to_tuple.tuple_id).ok_or(CodegenError::InvalidTupleID(write_to_tuple.tuple_id))?;
+      let tuple_field_value = cg.builder.build_load(tuple_field_ptr, "tuple_field").into_int_value();
+      let new_bit = cg.uint_const(1 << (tuple_offset + write_to_tuple.tuple_index));
+      let new_tuple_field_value = cg.builder.build_or(tuple_field_value, new_bit, "new_tuple_field_value");
+      cg.builder.build_store(tuple_field_ptr, new_tuple_field_value);
+
+      let tuple_size = module.tuples.get(&write_to_tuple.tuple_id).ok_or(CodegenError::InvalidTupleID(write_to_tuple.tuple_id))?;
+      let mask = cg.uint_const((1 << tuple_size) - 1);
+
+      let pre_masked_value = cg.builder.build_right_shift(new_tuple_field_value, cg.uint_const(tuple_offset as u64), false, "pre_masked_value");
+      let masked_value = cg.builder.build_and(pre_masked_value, mask, "masked_value");
+      let test = cg.builder.build_int_compare(IntPredicate::EQ, masked_value, mask, "test");
+
+      conditional_expression(cg, test, |cg| {
+        for idx in 0..write_to_tuple.tuple_fields.len() {
+          let tuple_field = &write_to_tuple.tuple_fields[idx];
+          let from_value_ptr = cg.read_ptr_for_field(module, state_ptr, tuple_field)?;
+          let to_value_ptr = cg.update_ptr_for_field(module, state_ptr, &write_to_tuple.state, UpdatePtrPurpose::WriteAndSet)?;
+          let to_ptr = to_value_ptr.get_element_pointer(cg, idx)?;
+          from_value_ptr.load(cg, "from")?.store(cg, &to_ptr)?;
+        }
+        Ok(())
+      })?;
+
+      Ok(StateValue::new_none())
+    },
+    _ => todo!("Need to implement support for {:?}", expression.info),
   };
   cg.considering = old_considering;
   result
@@ -265,4 +295,19 @@ pub fn if_else_expression<'ctx>(
     result_if_false.add_to_phi_node(phi, if_false)?;
     Ok(StateValue::new_int(phi.as_basic_value().into_int_value()))
   }
+}
+
+pub fn conditional_expression<'ctx>(
+  cg: &mut CodegenState<'ctx>,
+  test: IntValue<'ctx>,
+  conditional_exp: impl Fn(&mut CodegenState<'ctx>) -> CodegenStatus
+) -> CodegenStatus {
+  let if_true = append_new_block(cg, "if_truew_block")?;
+  let after_if = append_new_block(cg, "after_if")?;
+  cg.builder.build_conditional_branch(test, if_true, after_if);
+  cg.builder.position_at_end(if_true);
+  conditional_exp(cg)?;
+  cg.builder.build_unconditional_branch(after_if);
+  cg.builder.position_at_end(after_if);
+  Ok(())
 }

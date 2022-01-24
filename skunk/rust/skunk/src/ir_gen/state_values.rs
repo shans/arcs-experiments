@@ -104,6 +104,7 @@ pub fn type_primitive_for_type(h_type: &ast::Type) -> Vec<TypePrimitive> {
     ast::Type::Bool => vec!(TypePrimitive::Bool),
     ast::Type::MemRegion => vec!(TypePrimitive::MemRegion),
     ast::Type::String => vec!(TypePrimitive::DynamicArrayOf(vec!(TypePrimitive::Char))),
+    ast::Type::NewType(_, t) => type_primitive_for_type(t),
     ast::Type::Tuple(members) => {
       let member_vec = members.iter().map(|t| type_primitive_for_type(t)).flatten().collect();
       if type_size(&member_vec) <= 16 {
@@ -111,7 +112,9 @@ pub fn type_primitive_for_type(h_type: &ast::Type) -> Vec<TypePrimitive> {
       } else {
         vec!(TypePrimitive::PointerTo(member_vec))
       }
-    }
+    },
+    ast::Type::Unresolved => panic!("shouldn't be seeing unresolved types here"),
+    _ => todo!("Need a type primitive for {:?}", h_type)
   }
 }
 
@@ -178,7 +181,7 @@ impl <'ctx> StatePointer<'ctx> {
         for sub_type in &self.pointer_type {
           let sub_ptr = cg.builder.build_struct_gep(ptr, pos, &format!("sub_ptr{}", pos)).or(Err(CodegenError::InvalidStructPointer("weirdness deconstructing compound primitive".to_string())))?;
           let sub_state_ptr = StatePointer::new_from_type_primitive(sub_ptr, vec!(sub_type.clone()));
-          sub_state_ptr.clear_update_pointer(cg);
+          sub_state_ptr.clear_update_pointer(cg)?;
           pos += 1;
         }
         Ok(())
@@ -194,6 +197,17 @@ impl <'ctx> StatePointer<'ctx> {
         Ok(())
       }
       PointerKind::ConstPointer => panic!("Can't clear a const pointer")
+    }
+  }
+
+  pub fn get_element_pointer(&self, cg: &CodegenState<'ctx>, idx: usize) -> CodegenResult<StatePointer<'ctx>> {
+    if self.pointer_type.len() == 1 {
+      let value = self.load(cg, "value")?;
+      value.tuple_index_ptr(cg, idx as u32)
+    } else {
+      let ptr = cg.builder.build_struct_gep(self.pointer.into_pointer_value(), idx as u32, "ptr").or_else(|_| Err(CodegenError::InvalidTupleID(idx)))?;
+      let ptr_type = self.pointer_type[idx].clone();
+      Ok(Self::new_from_type_primitive(ptr, vec!(ptr_type)))
     }
   }
 
@@ -256,6 +270,10 @@ impl <'ctx> StateValue<'ctx> {
       let tuple_llvm_type = super::llvm_type_for_primitive(cg, &tuple_type);
       let typed_tuple_ptr = cg.builder.build_bitcast(tuple_ptr, tuple_llvm_type, "ptr_as_struct_ptr").into_pointer_value();
       Ok(StateValue::new_static_mem_region_of_type(typed_tuple_ptr, tuple_type))
+    } else if tuple_type.len() > 1 {
+      let struct_type = llvm_type_for_primitive(cg, &tuple_type);
+      let struct_value = struct_type.const_zero();
+      Ok(StateValue { value: ValueParts::CompoundPrimitive(struct_value.into_struct_value()), value_type: tuple_type })
     } else {
       Err(CodegenError::TypeMismatch("Attempt to construct tuple from non-tuple type".to_string()))
     }
@@ -308,7 +326,7 @@ impl <'ctx> StateValue<'ctx> {
 
   fn only_value_type(&self) -> CodegenResult<&TypePrimitive> {
     if self.value_type.len() != 1 {
-      return Err(CodegenError::TypeMismatch("Attempt to treat inline aggregate value as atomic value".to_string()));
+      panic!("Attempt to treat inline aggregate value as atomic value");
     } 
     Ok(&self.value_type[0])
   }
@@ -342,14 +360,13 @@ impl <'ctx> StateValue<'ctx> {
         }
       }
       ValueParts::CompoundPrimitive(v) => {
-        // we need a pointer to the primitive - make an alloca and store into it
-        // TODO: there has to be a better way of doing this - we're literally copying the value into
-        // new memory in order to read it.
-        // Maybe carry the pointer in the StateValue? 
-        let alloca = cg.builder.build_alloca(v.get_type(), "temp_alloca");
-        cg.builder.build_store(alloca, v);
-        let tmp_sv = StateValue::new_static_mem_region_of_type(alloca, vec!(TypePrimitive::PointerTo(self.value_type.clone())));
-        tmp_sv.debug(cg, printer)
+        printer.open_bracket(cg, "(")?;
+        for type_idx in 0..self.value_type.len() {
+          let value = self.get_tuple_index(cg, type_idx as u32).unwrap();
+          value.debug(cg, printer)?;
+          printer.sep(cg, ",")?;
+        }
+        printer.close_bracket(cg, ")")
       }
       ValueParts::DynamicMemRegion(data, size) => {
         // TODO: this is only correct if an array of Char
@@ -381,7 +398,7 @@ impl <'ctx> StateValue<'ctx> {
   pub fn store(&self, cg: &CodegenState<'ctx>, ptr: &StatePointer<'ctx>) -> CodegenStatus {
     // TODO: more complex type comparison?
     if !(ptr.pointer_type == self.value_type) {
-      return Err(CodegenError::TypeMismatch("Attempt to store value into mismatched pointer".to_string()));
+      return Err(CodegenError::TypeMismatch(format!("Attempt to store value of type {:?} into mismatched pointer of type {:?}", self.value_type, ptr.pointer_type)));
     }
     match self.value {
       ValueParts::SimplePrimitive(v) => {
@@ -462,14 +479,25 @@ impl <'ctx> StateValue<'ctx> {
     let ptr_type = vec!(members[index as usize].clone());
     Ok(StatePointer::new_from_type_primitive(ptr, ptr_type))
   }
-  pub fn set_tuple_index(&self, cg: &CodegenState<'ctx>, index: u32, value: StateValue<'ctx>) -> CodegenStatus {
-    // TODO: we should probably check if this type matches the expression type.
-    let typed_ptr = self.tuple_index_ptr(cg, index)?;
-    value.store(cg, &typed_ptr)
+  pub fn set_tuple_index(&mut self, cg: &CodegenState<'ctx>, index: u32, value: StateValue<'ctx>) -> CodegenStatus {
+    if let ValueParts::CompoundPrimitive(v) = self.value {
+      // TODO: This only works for SimplePrimitives, make it work for everything..
+      let val = value.into_int_value().unwrap();
+      self.value = ValueParts::CompoundPrimitive(cg.builder.build_insert_value(v, val, index, "insert_value").unwrap().into_struct_value());
+      Ok(())
+    } else {
+      let typed_ptr = self.tuple_index_ptr(cg, index)?;
+      value.store(cg, &typed_ptr)
+    }
   }
   pub fn get_tuple_index(&self, cg: &CodegenState<'ctx>, index: u32) -> CodegenResult<StateValue<'ctx>> {
-    let typed_ptr = self.tuple_index_ptr(cg, index)?;
-    typed_ptr.load(cg, "tuple_at_idx")
+    if let ValueParts::CompoundPrimitive(v) = self.value {
+      let value = cg.builder.build_extract_value(v, index, "value").unwrap();
+      Ok(StateValue::new_prim_of_type(value, vec!(self.value_type[index as usize].clone())))
+    } else {
+      let typed_ptr = self.tuple_index_ptr(cg, index)?;
+      typed_ptr.load(cg, "tuple_at_idx")
+    }
   }
   pub fn add_to_phi_node(&self, node: PhiValue, block: BasicBlock<'ctx>) -> CodegenStatus {
     // TODO: non-unitary types
@@ -481,6 +509,18 @@ impl <'ctx> StateValue<'ctx> {
     Ok(())
   }
   pub fn equals(&self, cg: &mut CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
+    if self.value_type.len() > 1 {
+      if self.value_type.len() != other.value_type.len() {
+        panic!("can't compare a {:?} with a {:?}", self.value_type, other.value_type);
+      }
+      let mut result = StateValue::new_bool(cg.context.bool_type().const_int(1, false));
+      for idx in 0..self.value_type.len() {
+        let lhs = self.get_tuple_index(cg, idx as u32)?;
+        let rhs = other.get_tuple_index(cg, idx as u32)?;
+        result = expression_logical_and(cg, move |_cg| Ok(result.clone()), |cg| lhs.equals(cg, &rhs))?;
+      }
+      return Ok(result);
+    }
     let value_type = self.only_value_type()?;
     match value_type {
       TypePrimitive::Char | TypePrimitive::Int | TypePrimitive::Bool => self.apply_int_predicate(cg, IntPredicate::EQ, other),
@@ -637,7 +677,7 @@ pub enum UpdatePtrPurpose {
 
 impl <'ctx> CodegenState<'ctx> {
   pub fn read_ptr_for_field(&self, module: &ast::Module, state: PointerValue<'ctx>, name: &str) -> CodegenResult<StatePointer<'ctx>> {
-    let h_type = module.type_for_field(name).ok_or(CodegenError::BadReadFieldName(name.to_string()))?;
+    let h_type = module.type_for_field(name).unwrap(); //ok_or(CodegenError::BadReadFieldName(name.to_string()))?;
     if let Some(idx) = module.idx_for_field(name) {
       let struct_idx = (2 * idx).try_into().or(Err(CodegenError::InvalidIndex))?;
       let ptr = self.builder.build_struct_gep(state, struct_idx, &("read_ptr_to".to_string() + name)).or(Err(CodegenError::InvalidStructPointer("read_ptr_for_field given bad state pointer".to_string())))?;
@@ -645,7 +685,7 @@ impl <'ctx> CodegenState<'ctx> {
     } else if let Some(idx) = module.value_param_idx_for_field(name) {
       dbg!(idx);
       dbg!(state.get_type());
-      let param_idx = module.idx_for_bitfield() + idx + 1;
+      let param_idx = module.offset_for_value_params() + idx;
       dbg!(param_idx);
       dbg!(&h_type);
       let ptr = self.builder.build_struct_gep(state, param_idx as u32, &("read_param_ptr_to".to_string() + name)).or(Err(CodegenError::InvalidStructPointer("read_ptr_for_field given bad state pointer".to_string())))?;
@@ -681,14 +721,19 @@ impl <'ctx> CodegenState<'ctx> {
     Ok(StatePointer::new(ptr, h_type))
   }
 
+  pub fn module_tuple_field_ptr(&self, module: &ast::Module, state: PointerValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
+    let tuple_field_idx = module.idx_for_tuple_field().try_into().unwrap();
+    self.builder.build_struct_gep(state, tuple_field_idx, "tuple_field_ptr").or(Err(CodegenError::InvalidStructPointer("module_tuple_field_ptr given bad state pointer".to_string())))
+  }
+
   pub fn module_bitfield_ptr(&self, module: &ast::Module, state: PointerValue<'ctx>) -> CodegenResult<PointerValue<'ctx>> {
     let bitfield_idx = module.idx_for_bitfield().try_into().unwrap();
-    self.builder.build_struct_gep(state, bitfield_idx, "bitfield_ptr").or(Err(CodegenError::InvalidStructPointer("module_bitfield_ptr given bad state pointer".to_string())))
+    Ok(self.builder.build_struct_gep(state, bitfield_idx, "bitfield_ptr").unwrap())
+    //self.builder.build_struct_gep(state, bitfield_idx, "bitfield_ptr").or(Err(CodegenError::InvalidStructPointer("module_bitfield_ptr given bad state pointer".to_string())))
   }
 
   pub fn submodule_ptr(&self, module: &ast::Module, state: PointerValue<'ctx>, index: usize) -> CodegenResult<PointerValue<'ctx>> {
-    let mut base_idx: u32 = module.idx_for_bitfield().try_into().unwrap();
-    base_idx += 1;
+    let base_idx: u32 = module.offset_for_submodules().try_into().unwrap();
     let offset: u32 = index.try_into().unwrap();
     self.builder.build_struct_gep(state, base_idx + offset, &(module.submodules[index].module.name.clone() + "_ptr")).or(Err(CodegenError::InvalidStructPointer("submodule_ptr given bad state pointer".to_string())))
   }

@@ -23,10 +23,11 @@ fn ee_for_string<F>(module: &str, func: F) -> CodegenStatus
     func(ee, &modules[0]);
   } else {
     let mut graph = graph_builder::make_graph(ast::graphs(&ast));
-    graph_builder::resolve_graph(&ast::modules(&ast), &mut graph).unwrap();
     let modules = ast::modules(&ast);
     let mut main = ast::Module::create("Main", Vec::new(), Vec::new(), Vec::new(), ast::Examples { examples: Vec::new() }, Vec::new(), Vec::new());
-    graph_to_module::graph_to_module(&mut main, graph, modules, "Main").unwrap();
+    
+    graph_builder::resolve_graph(&main, &ast::modules(&ast), &mut graph).unwrap();
+    graph_to_module::graph_to_module(&mut main, graph, modules).unwrap();
     let mut jit_info = JitInfo::new();
     let cg_modules = codegen(&context, &mut jit_info, &main)?;
     let ee = jit_info.execution_engine.unwrap();

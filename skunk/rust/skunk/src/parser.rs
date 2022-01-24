@@ -75,8 +75,13 @@ fn tuple_type(i: Span) -> ParseResult<ast::Type> {
   Ok((input, ast::Type::Tuple(members)))
 }
 
+fn named_type(i: Span) -> ParseResult<ast::Type> {
+  let (i, uname) = uppercase_name(i)?;
+  Ok((i, ast::Type::TypeName(uname.to_string())))
+}
+
 fn handle_type(i: Span) -> ParseResult<ast::Type> {
-  cut(alt((type_primitive_token, tuple_type)))(i)
+  cut(alt((type_primitive_token, tuple_type, named_type)))(i)
 }
 
 fn handle(i: Span) -> ParseResult<ast::Handle> {
@@ -459,6 +464,15 @@ fn use_statement(i: Span) -> ParseResult<ast::Use> {
   Ok((input, ast::Use { name: name.to_string() }))
 }
 
+fn newtype(i: Span) -> ParseResult<ast::NewType> {
+  let (i, (name, nt_type, _)) = tuple((
+    preceded(tuple((tag("type"), multispace1)), uppercase_name),
+    preceded(tuple((multispace0, char('='), multispace0)), handle_type),
+    preceded(multispace0, char(';'))
+  ))(i)?;
+  Ok((i, ast::NewType { name: name.to_string(), nt_type }))
+}
+
 fn graph_top_level(i: Span) -> ParseResult<ast::TopLevel> {
   let (input, graph) = graph(i)?;
   Ok((input, ast::TopLevel::Graph(graph)))
@@ -474,8 +488,13 @@ fn use_top_level(i: Span) -> ParseResult<ast::TopLevel> {
   Ok((input, ast::TopLevel::Use(use_statement)))
 }
 
+fn newtype_top_level(i: Span) -> ParseResult<ast::TopLevel> {
+  let (i, newtype) = newtype(i)?;
+  Ok((i, ast::TopLevel::NewType(newtype)))
+}
+
 fn top_level(i: Span) -> ParseResult<ast::TopLevel> {
-  alt((graph_top_level, module_top_level, use_top_level))(i)
+  alt((graph_top_level, module_top_level, use_top_level, newtype_top_level))(i)
 }
 
 // TODO: Make this private, and provide a public wrapper that is nicer

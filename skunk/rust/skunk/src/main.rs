@@ -20,9 +20,12 @@ use std::collections::HashMap;
 
 use std::process::Command;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 #[derive(Debug)]
 enum SkunkError {
-  FileNotFound,
+  FileNotFound(String),
   FileUnreadable,
   ParseFailed,
   GraphBuilderError(graph_builder::GraphBuilderError),
@@ -51,27 +54,38 @@ impl <'a> From<ir_gen::codegen_state::CodegenError> for SkunkError {
 struct FileData {
   buffer: String,
   ast: Vec<ast::TopLevel>,
-  main_module: Option<ast::Module>,
+  main_module: Option<Rc<ast::Module>>,
 }
 
 
 struct MainData {
-  file_info: HashMap<String, FileData>,
+  file_info: RefCell<HashMap<String, Rc<FileData>>>,
 }
 
 impl MainData {
   fn new() -> Self {
-    Self { file_info: HashMap::new() }
+    Self { file_info: RefCell::new(HashMap::new()) }
   }
-  fn load_file(&mut self, location: &str) -> Result<(), SkunkError> {
-    let file_data = FileData::new();
-    self.file_info.insert(location.to_string(), file_data);
-
-    self.file_info.get_mut(location).unwrap().prepare(location)?;
+  fn load_file(&self, location: &str) -> Result<(), SkunkError> {
+    let mut file_data = FileData::new();
+    file_data.prepare(self, location)?;
+    {
+      self.file_info.borrow_mut().insert(location.to_string(), Rc::new(file_data));
+    }
     Ok(())
   }
-  fn main_module_for_file(&self, location: &str) -> Option<&ast::Module> {
-    self.file_info.get(location).and_then(|file_info| (&file_info.main_module).as_ref())
+  fn main_module_for_file(&self, location: &str) -> Option<Rc<ast::Module>> {
+    let existing_data = {
+      let file_info = self.file_info.borrow();
+      file_info.get(location).map(|r| (*r).clone())
+    };
+    match existing_data {
+      None => {
+        self.load_file(location).ok()?;
+        self.file_info.borrow().get(location).and_then(|file_info| (file_info.main_module.clone()))    
+      }
+      Some(info) => info.main_module.clone()
+    }
   }
 }
 
@@ -80,8 +94,15 @@ impl FileData {
     Self { ast: Vec::new(), main_module: None, buffer: String::new() }
   }
 
-  fn prepare(&mut self, location: &str) -> Result<(), SkunkError> {
-    let mut f = File::open(location).or(Err(SkunkError::FileNotFound))?;
+  fn prepare(&mut self, main_data: &MainData, location: &str) -> Result<(), SkunkError> {
+    dbg!(location);
+    let slash = location.rfind("/");
+    let prefix = match slash {
+      None => "./",
+      Some(pos) => &location[0..pos+1]
+    };
+    dbg!(prefix);
+    let mut f = File::open(location).or(Err(SkunkError::FileNotFound(location.to_string())))?;
     f.read_to_string(&mut self.buffer).or(Err(SkunkError::FileUnreadable))?;
 
     let (remainder, mut ast) = match parser::parse(&self.buffer) {
@@ -96,38 +117,50 @@ impl FileData {
     if remainder.fragment().len() > 0 {
       println!("Left over: {}", remainder);
     }
-   
+  
+    let dependencies = ast::uses(&ast);
     let mut processed_modules = Vec::new();
+    for dependency in dependencies {
+      // TODO: Absolute paths, imports from other places, etc. etc.
+      let file_name = format!("{}{}.skunk", prefix, dependency.name);
+      let module = main_data.main_module_for_file(&file_name).ok_or(SkunkError::FileNotFound(file_name.clone()))?;
+      processed_modules.push(module);
+    }
+
+    let newtypes = ast::newtypes(&ast).iter().map(|a| (*a).clone()).collect();
+
     { 
       let mut modules = ast::modules_mut(&mut ast);
       for i in 0..modules.len() {
+        modules[i].resolve_types(&newtypes);
         if modules[i].graph.len() > 0 {
           let mut graph = graph_builder::make_graph(modules[i].graph.iter().collect());
-          let processed_refs = processed_modules.iter().collect();
-          graph_builder::resolve_graph(&processed_refs, &mut graph)?;
-          graph_to_module::graph_to_module(modules[i], graph, processed_refs, "")?;
+          let processed_refs = processed_modules.iter().map(|r| r.as_ref()).collect();
+          graph_builder::resolve_graph(modules[i], &processed_refs, &mut graph)?;
+          graph_to_module::graph_to_module(modules[i], graph, processed_refs)?;
+          println!("{}", modules[i].minidump());
         }
-        processed_modules.push(modules[i].clone())
+        processed_modules.push(Rc::new(modules[i].clone()))
       }
     }
     self.ast = ast;
     let ast_graphs = ast::graphs(&self.ast);
-    let processed_refs = processed_modules.iter().collect();
+    let processed_refs = processed_modules.iter().map(|r| r.as_ref()).collect();
 
     // TODO: Instead of duplicating graph processing logic, push the main module onto the end of the mutable modules list and
     // deal with it in the same pass as the rest.
     if ast_graphs.len() > 0 {
       let mut graph = graph_builder::make_graph(ast::graphs(&self.ast));
-
-      graph_builder::resolve_graph(&processed_refs, &mut graph)?;
-
       let mut main = ast::Module::create("Main", Vec::new(), Vec::new(), Vec::new(), ast::Examples { examples: Vec::new() }, Vec::new(), Vec::new());
-      graph_to_module::graph_to_module(&mut main, graph, processed_refs, "Main")?;
-      self.main_module = Some(main);
+
+      graph_builder::resolve_graph(&main, &processed_refs, &mut graph)?;
+
+      graph_to_module::graph_to_module(&mut main, graph, processed_refs)?;
+      self.main_module = Some(Rc::new(main));
     } else if processed_refs.len() == 1 {
       // TODO: This isn't really correct - there needs to be some way
       // of determining which module is "main".
-      self.main_module = Some(processed_refs[0].clone());
+      self.main_module = Some(Rc::new(processed_refs[0].clone()));
     } else {
       let slash_pos = location.rfind('/');
       // TODO: This maybe assumes ASCII (byte boundary == character boundary)
@@ -137,7 +170,7 @@ impl FileData {
       };
       let module_name = module_name.strip_suffix(".skunk").unwrap();
       dbg!(&module_name);
-      self.main_module = processed_refs.iter().find(|module| module.name == module_name).map(|module| (*module).clone())
+      self.main_module = processed_refs.iter().find(|module| module.name == module_name).map(|module| Rc::new((*module).clone()))
     }
     Ok(())
   }
@@ -200,7 +233,7 @@ fn build_test_examples(main_data: &mut MainData, location: &str) -> Result<(), S
 
   let mut objects: Vec<String> = Vec::new();
   for module in &cg_modules {
-    module.print_to_stderr();
+    // module.print_to_stderr();
     let name = module.get_name().to_str().unwrap();
     let object_name = name.to_string() + ".o";
     let path = Path::new(&object_name);
@@ -216,6 +249,7 @@ fn build_test_examples(main_data: &mut MainData, location: &str) -> Result<(), S
 
   let mut command = Command::new("clang");
   let mut cmd = command.arg("-o").arg(&(location.to_string() + "_examples"));
+  dbg!(&objects);
   for object in objects {
     cmd = cmd.arg(object);
   }

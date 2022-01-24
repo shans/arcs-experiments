@@ -24,6 +24,7 @@ pub enum CodegenError {
   NotInABlock,
   InvalidFunctionArgument(String),
   TypeMismatch(String),
+  InvalidTupleID(usize),
   NakedBreak,
 }
 

@@ -31,7 +31,10 @@ pub enum Type {
   Char,
   Bool,
   MemRegion,
-  Tuple(Vec<Type>)
+  Tuple(Vec<Type>),
+  Unresolved,
+  TypeName(String),
+  NewType(String, Box<Type>)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -72,6 +75,14 @@ pub struct CopyTo {
   pub state: String,
   pub submodule_index: usize,
   pub submodule_state: String,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct WriteToTuple {
+  pub state: String,
+  pub tuple_fields: Vec<String>,
+  pub tuple_id: usize,
+  pub tuple_index: usize,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -181,6 +192,10 @@ impl Expression {
     let copy_to = CopyTo { state: state.to_string(), submodule_index, submodule_state: submodule_state.to_string() };
     Expression::terminated(ExpressionValue { info: ExpressionValueEnum::CopyToSubModule(copy_to), position })
   }
+  pub fn write_to_tuple(position: SafeSpan, state: &str, tuple_fields: &Vec<String>, tuple_id: usize, tuple_index: usize) -> Self {
+    let write_to_tuple = WriteToTuple { state: state.to_string(), tuple_fields: tuple_fields.clone(), tuple_id, tuple_index };
+    Expression::terminated(ExpressionValue { info: ExpressionValueEnum::WriteToTuple(write_to_tuple), position })
+  }
 }
 
 pub struct Expr<'a> {
@@ -272,14 +287,16 @@ pub enum ExpressionValueEnum {
   // TODO: ArrayLookup and maybe TupleLookup should probably be examples of BinaryOperators.
   ArrayLookup(Box<ExpressionValue>, Box<ExpressionValue>),
   ReferenceToState(String),
-  CopyToSubModule(CopyTo),
   FunctionCall(String, Box<ExpressionValue>),
   StringLiteral(String),
   IntLiteral(i64),
   CharLiteral(u8),
   Tuple(Vec<ExpressionValue>),
   TupleLookup(Box<ExpressionValue>, i64),
-  BinaryOperator(Box<ExpressionValue>, Operator, Box<ExpressionValue>)
+  BinaryOperator(Box<ExpressionValue>, Operator, Box<ExpressionValue>),
+
+  CopyToSubModule(CopyTo),
+  WriteToTuple(WriteToTuple),
 }
 
 impl From<Expression> for ExpressionValue {
@@ -360,9 +377,27 @@ pub struct Module {
   pub examples: Examples,
   pub value_params: Vec<ValueParam>,
   pub graph: Vec<GraphDirective>,
+  pub tuples: HashMap<usize, usize>
 }
 
+/**
+ * layout:
+ *  [ field_value, field_update ]
+ *  current updates bitmap
+ *  (optional) tuple initialization bitmap
+ *  [ param_value ]
+ *  [ submodule pointer ]
+ */
 impl Module {
+  pub fn minidump(&self) -> String {
+    let mut s = format!("module {} {{\n", self.name);
+    for handle in &self.handles {
+      s += &format!("  {}: {:?};\n", handle.name, handle.h_type);
+    }
+
+    s += &"|\n";
+    s
+  }
   pub fn idx_for_field(&self, field: &str) -> Option<usize> {
     self.handles.iter().position(|handle| handle.name == field)
   }
@@ -373,6 +408,34 @@ impl Module {
 
   pub fn idx_for_bitfield(&self) -> usize {
     self.handles.len() * 2
+  }
+
+  pub fn idx_for_tuple_field(&self) -> usize {
+    if self.tuples.len() == 0 {
+      panic!("Should not be retrieving tuple field idx for modules with no tuples");
+    }
+    self.idx_for_bitfield() + 1
+  }
+
+  pub fn offset_for_tuple(&self, uid: usize) -> Option<usize> {    
+    let mut offset = 0;
+    for i in 0..uid {
+      let increment = self.tuples.get(&i)?;
+      offset += increment;
+    }
+    Some(offset)
+  }
+
+  pub fn offset_for_value_params(&self) -> usize {
+    if self.tuples.len() > 0 {
+      self.idx_for_tuple_field() + 1
+    } else {
+      self.idx_for_bitfield() + 1
+    }
+  }
+
+  pub fn offset_for_submodules(&self) -> usize {
+    self.offset_for_value_params() + self.value_params.len()
   }
 
   pub fn outputs(&self) -> Vec<&Handle> {
@@ -401,6 +464,15 @@ impl Module {
     } 
   }
 
+  pub fn resolve_types(&mut self, newtypes: &Vec<NewType>) {
+    for idx in 0..self.handles.len() {
+      if let Type::TypeName(name) = &self.handles[idx].h_type {
+        let underlying = newtypes.iter().find(|nt| nt.name == *name).unwrap();
+        self.handles[idx].h_type = Type::NewType(name.clone(), Box::new(underlying.nt_type.clone()));
+      }
+    }
+  }
+
   pub fn create(
     name: &str, 
     handles: Vec<Handle>, 
@@ -410,7 +482,7 @@ impl Module {
     value_params: Vec<ValueParam>,
     graph: Vec<GraphDirective>
   ) -> Self {
-    Module { name: name.to_string(), handles, listeners, submodules, examples, value_params, graph }
+    Module { name: name.to_string(), handles, listeners, submodules, examples, value_params, graph, tuples: HashMap::new() }
   }
 }
 
@@ -449,11 +521,28 @@ pub struct Use {
   pub name: String,
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct NewType {
+  pub name: String,
+  pub nt_type: Type,
+}
+
 #[derive(Debug, PartialEq)]
 pub enum TopLevel {
   Module(Module),
   Graph(GraphDirective),
   Use(Use),
+  NewType(NewType),
+}
+
+pub fn uses(ast: &Vec<TopLevel>) -> Vec<&Use> {
+  ast.iter().filter_map(|top_level| {
+    if let TopLevel::Use(use_statement) = top_level {
+      Some(use_statement)
+    } else {
+      None
+    }
+  }).collect()
 }
 
 pub fn modules(ast: &Vec<TopLevel>) -> Vec<&Module> {
@@ -478,6 +567,15 @@ pub fn graphs(ast: &Vec<TopLevel>) -> Vec<&GraphDirective> {
   ast.iter().filter_map(|top_level| {
     match top_level {
       TopLevel::Graph(g) => Some(g),
+      _ => None
+    }
+  }).collect()
+}
+
+pub fn newtypes(ast: &Vec<TopLevel>) -> Vec<&NewType> {
+  ast.iter().filter_map(|top_level| {
+    match top_level {
+      TopLevel::NewType(t) => Some(t),
       _ => None
     }
   }).collect()

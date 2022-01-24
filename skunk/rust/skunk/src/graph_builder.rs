@@ -4,7 +4,10 @@ use super::ast;
 #[derive(Debug)]
 pub enum GraphBuilderError {
   NotModuleEndpoint(graph::Endpoint),
+  NotHandleEndpoint(graph::Endpoint),
   ModuleNotFound(String),
+  HandleNotFound(String),
+  MismatchedTypes,
 }
 
 pub fn make_graph(ast: Vec<&ast::GraphDirective>) -> graph::Graph {
@@ -48,10 +51,7 @@ pub fn add_graph_module_info(graph: &mut graph::Graph, info: &ast::GraphModuleIn
     }
     ast::GraphModuleInfo::Field(specifier, h_name) => {
       if specifier == &ast::ModuleSpecifier::This {
-        // TODO: Need to plumb module info through so that types can be determined
-        // though actually, it's resolve that does that. So maybe we need a special
-        // Unresolved type to signify we still need to do some work?
-        graph.add_handle(h_name, ast::Type::Int)
+        graph.add_handle(h_name, ast::Type::Unresolved)
       } else {
         todo!("can't add fields that aren't This.fields yet")
       }
@@ -60,10 +60,27 @@ pub fn add_graph_module_info(graph: &mut graph::Graph, info: &ast::GraphModuleIn
   }
 }
 
-pub fn resolve_graph(modules: &Vec<&ast::Module>, graph: &mut graph::Graph) -> Result<(), GraphBuilderError> {
+pub fn resolve_graph(module: &ast::Module, sub_modules: &Vec<&ast::Module>, graph: &mut graph::Graph) -> Result<(), GraphBuilderError> {
+  resolve_handles(module, graph)?;
+  let mut uid = 0;
   let connections = graph.filter_module_to_module_connections();
-  let success: Result<Vec<_>, _> = connections.iter().map(|connection| expand_to_full_connection(modules, graph, connection)).collect();
-  success?; Ok(())
+  let success: Result<Vec<_>, _> = connections.iter().map(|connection| expand_to_full_connection(sub_modules, graph, connection, &mut uid)).collect();
+  success?;
+  let m2h_connections = graph.filter_module_to_handle_connections();
+  for connection in m2h_connections {
+    expand_to_full_connection(sub_modules, graph, &connection, &mut uid)?;
+  }
+  dbg!(&graph);
+  Ok(())
+}
+
+fn resolve_handles(module: &ast::Module, graph: &mut graph::Graph) -> Result<(), GraphBuilderError> {
+  let unresolved_handles: Vec<_> = graph.handles.iter_mut().filter(|handle| handle.h_type == ast::Type::Unresolved).collect();
+  for mut handle in unresolved_handles {
+    let module_handle = module.handle_for_field(&handle.name).ok_or(GraphBuilderError::HandleNotFound(handle.name.clone()))?;
+    handle.h_type = module_handle.h_type.clone();
+  }
+  Ok(())
 }
 
 pub fn find_module_by_name<'a>(modules: &Vec<&'a ast::Module>, name: &str) -> Option<&'a ast::Module> {
@@ -82,8 +99,6 @@ pub fn type_encapsulates(super_type: &ast::Handle, sub_type: &ast::Handle) -> bo
 }
 
 fn matching_connections<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast::Module) -> Vec<(&'a str, &'b str, ast::Type)> {
-  dbg!(from_module);
-  dbg!(to_module);
   let from_connections = from_module.outputs();
   let to_connections = to_module.inputs();
   from_connections.iter().map(|from_con| {
@@ -99,14 +114,54 @@ fn matching_connections<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast
 
 fn only_matching_connection<'a, 'b>(from_module: &'a ast::Module, to_module: &'b ast::Module) -> (&'a str, &'b str, ast::Type) {
   let matches = matching_connections(from_module, to_module);
-  dbg!(&matches);
   assert!(matches.len() == 1);
   matches[0].clone()
 }
 
-fn expand_to_full_connection(modules: &Vec<&ast::Module>, graph: &mut graph::Graph, connection: &graph::Arrow) -> Result<(), GraphBuilderError> {
+fn connections_matching_type<'a>(from_module: &'a ast::Module, to_type: &ast::Type) -> Vec<(&'a str, ast::Type)> {
+  let from_connections = from_module.outputs();
+  from_connections.iter().filter_map(|from_con| {
+    // TODO: Better type checking here
+    if from_con.h_type == *to_type {
+      Some((from_con.name.as_str(), from_con.h_type.clone()))
+    } else {
+      None
+    }
+  }).collect()
+}
+
+fn only_connection_matching_type<'a>(from_module: &'a ast::Module, to_type: &ast::Type) -> (&'a str, ast::Type) {
+  let matches = connections_matching_type(from_module, to_type);
+  assert!(matches.len() == 1);
+  matches[0].clone()
+}
+
+fn expand_to_full_connection(modules: &Vec<&ast::Module>, graph: &mut graph::Graph, connection: &graph::Arrow, uid: &mut usize) -> Result<(), GraphBuilderError> {
   let conn_from = &connection.from;
   let conn_to = &connection.to;
+  if let graph::Endpoint::Tuple(connections) = conn_from {
+    // TODO: can only deal with tuples to handles for now.
+    let to_handle_idx = conn_to.handle_idx().ok_or(GraphBuilderError::NotHandleEndpoint(conn_to.clone()))?;
+    let to_type = graph.handles[to_handle_idx].h_type.clone();
+    if let ast::Type::Tuple(sub_types) = to_type {
+      assert!(sub_types.len() == connections.len());
+      for idx in 0..connections.len() {
+        let from_module_idx = connections[idx].module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(conn_from.clone()))?;
+        let from_module = find_module_by_name(modules, &graph.modules[from_module_idx]).ok_or(
+          GraphBuilderError::ModuleNotFound(graph.modules[from_module_idx].clone()))?;
+        let (from_name, _compatible_type) = only_connection_matching_type(from_module, &sub_types[idx]);
+        let from_connection = graph.add_connection(from_name);
+        let conn_from = graph::Endpoint::Simple(connections[idx]);
+        graph.connect(&conn_from, &from_connection);
+        graph.connect_tuple_constructor(&from_connection, conn_to, *uid, idx);
+      }
+      *uid += 1;
+      return Ok(());
+    } else {
+      return Err(GraphBuilderError::MismatchedTypes);
+    }
+  }
+
   let from_module_idx = conn_from.module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(conn_from.clone()))?;
   let to_module_idx = conn_to.module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(conn_to.clone()))?;
   let from_module = find_module_by_name(modules, &graph.modules[from_module_idx]).ok_or(

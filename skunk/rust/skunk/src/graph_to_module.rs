@@ -31,18 +31,25 @@ pub struct HandleMappingInfo {
   pub submodule_handle: String
 }
 
+#[derive(Debug)]
+pub enum WriteBehaviour {
+  WritesToSubmodule(usize, String),
+  // (handle to write to, handles to read from, uid for this constructor, index into read handles)
+  WritesToTupleHandle(String, Vec<String>, usize, usize),
+  None
+}
+
 // Information about a new handle that will exist on the constructed module.
 #[derive(Debug)]
 pub struct HandleInfo {
   pub handle: ast::Handle,
-  pub writes_to_submodule: usize,
   pub mapped_for_submodules: Vec<HandleMappingInfo>,
-  pub submodule_handle: String
+  pub write_behaviour: WriteBehaviour
 }
 
-pub fn graph_to_module(module: &mut ast::Module, graph: graph::Graph, modules: Vec<&ast::Module>, name: &str) -> Result<(), GraphToModuleError> {
+pub fn graph_to_module(module: &mut ast::Module, graph: graph::Graph, modules: Vec<&ast::Module>) -> Result<(), GraphToModuleError> {
   let module_context = ModuleContext::new(graph, modules)?;
-  let mut handle_infos = module_context.generate_handles()?;
+  let mut handle_infos = module_context.generate_handles(&mut module.tuples)?;
   let mut submodules: Vec<ast::ModuleInfo> = module_context.submodules().drain(..).map(|module| ast::ModuleInfo { module, handle_map: HashMap::new() }).collect();
   for handle_info in &handle_infos {
     for idx in &handle_info.mapped_for_submodules {
@@ -54,7 +61,9 @@ pub fn graph_to_module(module: &mut ast::Module, graph: graph::Graph, modules: V
   handle_infos.drain(..).for_each(|info| {
     let existing_handle = module.handle_for_field(&info.handle.name);
     if let Some(handle) = existing_handle {
+      // This handle name matches one on the public interface.
       if !graph_builder::type_encapsulates(handle, &info.handle) {
+        dbg!(&handle, &info.handle);
         error = Some(GraphToModuleError::InvalidHandleType(info.handle.name.clone()))
       }
     } else {
@@ -81,9 +90,11 @@ impl <'a> ModuleContext<'a> {
     Ok(Self { graph, modules, module_infos })
   }
 
-  // Generate handles required on the outer module, and capture associated information (connection & submodule that the handle feeds into)
-  // so that we can also generate listeners.
-  fn generate_handles(&self) -> Result<Vec<HandleInfo>, GraphToModuleError> {
+  /** 
+   * Generate handles required on the outer module, and capture associated information (connection & submodule that the handle feeds into)
+   * so that we can also generate listeners.
+   */
+  fn generate_handles(&self, tuples: &mut HashMap<usize, usize>) -> Result<Vec<HandleInfo>, GraphToModuleError> {
     let mut result: Vec<HandleInfo> = Vec::new();
 
     // Any submodule connections that aren't in the graph need to be added to the top-level module. These form the interface of the outer module.
@@ -91,9 +102,12 @@ impl <'a> ModuleContext<'a> {
     for (info, name) in connections {
       let handle = info.module.handle_for_field(&name).ok_or_else(|| GraphToModuleError::NameNotInHandleList(info.module.clone(), name.clone()))?;
       let mapping_info = HandleMappingInfo { submodule_idx: info.index, submodule_handle: name.clone() };
-      let writes_to_submodule = info.index;
-      let submodule_handle = name.clone();
-      result.push(HandleInfo { handle: handle.clone(), writes_to_submodule, mapped_for_submodules: vec!(mapping_info), submodule_handle });
+      let write_behaviour = if handle.is_input() {
+        WriteBehaviour::WritesToSubmodule(info.index, name.clone())
+      } else {
+        WriteBehaviour::None
+      };
+      result.push(HandleInfo { handle: handle.clone(), write_behaviour, mapped_for_submodules: vec!(mapping_info) });
     }
 
     // Additionally, any handles in the graph need to be represented as connections in the top-level module so that the value of the handle can be tracked
@@ -105,26 +119,51 @@ impl <'a> ModuleContext<'a> {
 
       let mut mapped_for_submodules = Vec::new();
       let mut writes_to_submodule = 0;
-      let mut submodule_handle = &"".to_string(); 
+      let mut submodule_handle = &"".to_string();
       for connection in candidate_connections {
         // We have a connection that connects to the constructed handle. From that we need to fetch the connected module..
-        let connection_idx = connection.connection_idx().unwrap();
-        let candidate_modules = self.graph.endpoints_associated_with_endpoint(connection.simple_endpoint().unwrap(), graph::EndpointSpec::AnyModule);
+        let connection_idx = connection.0.connection_idx().unwrap();
+        let candidate_modules = self.graph.endpoints_associated_with_endpoint(connection.0.simple_endpoint().unwrap(), graph::EndpointSpec::AnyModule);
         if candidate_modules.len() != 1 {
           return Err(GraphToModuleError::MultipleModulesForConnection(self.graph.connections[connection_idx].clone()));
         }
-        let module = candidate_modules[0];
-        // .. retrieve the actual module info from the modules list ..
+        let module = candidate_modules[0].0;
+        // .. and retrieve the actual module info from the modules list
         let candidate_writes_to_submodule = module.module_idx().unwrap();
-        let candidate_submodule_handle = &self.graph.connections[connection_idx];
-        // all modules connected in this way participate in the map, collect them here.
-        mapped_for_submodules.push(HandleMappingInfo { submodule_idx: candidate_writes_to_submodule, submodule_handle: candidate_submodule_handle.clone() });
         let submodule_name = &self.graph.modules[candidate_writes_to_submodule];
         let submodule = self.find_module_by_name(&submodule_name).ok_or_else(|| GraphToModuleError::NameNotInModuleList(submodule_name.clone()))?;
         let connection_name = &self.graph.connections[connection_idx];
-        // .. and make sure that this connection inputs into the module. If so, then the connection we found is going to be
-        // triggered by a listener associated with this handle.
         let submodule_connection = submodule.handle_for_field(connection_name).ok_or_else(|| GraphToModuleError::NameNotInHandleList(submodule.clone(), connection_name.clone()))?;
+
+        if let graph::ArrowInfo::TupleConstructor(u, n) = connection.1.info {
+          // if the arrow is a tuple construction arrow, then we need to create a toplevel handle
+          // for the output of the module connection on the LHS. Then we need to register a handler for that handle
+          // which copies updates into the RHS and checks the initialization tags. We also need to make
+          // sure the module knows to reserve initialization tags for the components of the RHS.
+          let new_handle = ast::Handle { 
+            position: ast::SafeSpan { offset: 0, line: 1}, 
+            name: format!("{}.{}", handle.name, n), 
+            h_type: submodule_connection.h_type.clone(),
+            usages: vec!(ast::Usage::Read, ast::Usage::Write)
+          };
+          result.push(HandleInfo {
+            handle: new_handle, 
+            mapped_for_submodules: vec!(HandleMappingInfo { submodule_idx: candidate_writes_to_submodule, submodule_handle: connection_name.clone() }),
+            write_behaviour: WriteBehaviour::WritesToTupleHandle(handle.name.clone(), Vec::new(), u, n)
+          });
+          match tuples.get(&u) {
+            None => { tuples.insert(u, n + 1); },
+            Some(v) => if (n + 1) > *v { tuples.insert(u, n + 1); }
+          }
+
+          continue;
+        }
+
+        // all modules connected in this way participate in the map, collect them here.
+        mapped_for_submodules.push(HandleMappingInfo { submodule_idx: candidate_writes_to_submodule, submodule_handle: connection_name.clone() });
+
+        // make sure that this connection inputs into the module. If so, then the connection we found is going to be
+        // triggered by a listener associated with this handle.
         if !submodule_connection.is_input() {
           continue;
         }
@@ -133,20 +172,42 @@ impl <'a> ModuleContext<'a> {
           panic!("Handle has multiple readers, can't cope");
         }
         writes_to_submodule = candidate_writes_to_submodule;
-        submodule_handle = candidate_submodule_handle;
+        submodule_handle = connection_name;
         candidate_found = true;
       }
+
       if !candidate_found {
-        panic!("Handle has no readers, can't cope");
+        // There's no read candidate for this handle
+        let new_handle = ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: handle.name.clone(), h_type: handle.h_type.clone(), usages: vec!(ast::Usage::Write) };
+        result.push(HandleInfo { handle: new_handle, write_behaviour: WriteBehaviour::None, mapped_for_submodules });
+      } else {
+        // TODO: What's the right place to position these synthetic handles?
+        let new_handle = ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: handle.name.clone(), h_type: handle.h_type.clone(), usages: vec!(ast::Usage::Read, ast::Usage::Write) };
+        let write_behaviour = WriteBehaviour::WritesToSubmodule(writes_to_submodule, submodule_handle.clone());
+        result.push(HandleInfo { handle: new_handle, write_behaviour, mapped_for_submodules });
       }
-      // TODO: What's the right place to position these synthetic handles?
-      let new_handle = ast::Handle { position: ast::SafeSpan { offset: 0, line: 1 }, name: handle.name.clone(), h_type: handle.h_type.clone(), usages: vec!(ast::Usage::Read, ast::Usage::Write) };
-      result.push(HandleInfo { handle: new_handle, writes_to_submodule, mapped_for_submodules, submodule_handle: submodule_handle.clone() });
-      // TODO: it's probably an error if there are no readers?
       index += 1;
     }
 
-    Ok(result)
+    let mut all_handle_names = HashMap::<usize, Vec<String>>::new();
+    for handle_info in &result {
+      if let WriteBehaviour::WritesToTupleHandle(_, _, u, n) = &handle_info.write_behaviour {
+        if !all_handle_names.contains_key(u) {
+          all_handle_names.insert(*u, Vec::<String>::new());
+        }
+        all_handle_names.get_mut(u).unwrap().push(handle_info.handle.name.clone());
+      }
+    }
+
+    let mut output = vec!();
+    for mut handle_info in result {
+      if let WriteBehaviour::WritesToTupleHandle(name, _, u, n) = &handle_info.write_behaviour {
+        handle_info.write_behaviour = WriteBehaviour::WritesToTupleHandle(name.to_string(), all_handle_names.get(u).unwrap().clone(), *u, *n);
+      }
+      output.push(handle_info);
+    }
+
+    Ok(output)
   }
 
   fn find_module_by_name(&self, name: &str) -> Option<&ast::Module> {
@@ -170,7 +231,7 @@ impl <'a> ModuleContext<'a> {
     // then C will also have an arrow to a handle H  -   M -> C -> H or H -> C -> M.
     let connected_connections: Vec<&str> = self.graph.endpoints_associated_with_endpoint(graph::SimpleEndpoint::Module(module_info.index), graph::EndpointSpec::AnyConnection)
       .iter().map(|endpoint| {
-        match endpoint.simple_endpoint().unwrap() {
+        match endpoint.0.simple_endpoint().unwrap() {
           graph::SimpleEndpoint::Connection(idx) => self.graph.connections[idx].as_str(),
           _ => panic!("Shouldn't be possible to have non-connection endpoints here")
         }
@@ -184,13 +245,26 @@ impl <'a> ModuleContext<'a> {
     // all handles with read permissions need listeners
     // TODO: Appropriate span locations for generated code.
     handle_infos.iter().filter(|handle_info| handle_info.handle.is_input())
-                       .map(|handle_info| ast::Listener {
-                         trigger: handle_info.handle.name.clone(),
-                         kind: ast::ListenerKind::OnWrite,
-                         implementation: ast::Expression::output(ast::SafeSpan { offset: 0, line: 1 }, "", 
-                           ast::Expression::copy_to_submodule(ast::SafeSpan { offset: 0, line: 1 }, &handle_info.handle.name, handle_info.writes_to_submodule, &handle_info.submodule_handle), 
-                           false).value
-                       }).collect()
+                       .map(|handle_info| {
+                          match &handle_info.write_behaviour {
+                            WriteBehaviour::WritesToSubmodule(submodule, sub_handle_name) =>
+                              ast::Listener {
+                                trigger: handle_info.handle.name.clone(),
+                                kind: ast::ListenerKind::OnWrite,
+                                implementation: ast::Expression::output(ast::SafeSpan { offset: 0, line: 1 }, "", 
+                                  ast::Expression::copy_to_submodule(ast::SafeSpan { offset: 0, line: 1 }, &handle_info.handle.name, *submodule, sub_handle_name), 
+                                  false).value
+                              },
+                            WriteBehaviour::WritesToTupleHandle(name, handles, uid, idx) =>
+                              ast::Listener {
+                                trigger: handle_info.handle.name.clone(),
+                                kind: ast::ListenerKind::OnWrite,
+                                implementation: ast::Expression::output(ast::SafeSpan { offset: 0, line: 1}, "",
+                                  ast::Expression::write_to_tuple(ast::SafeSpan { offset: 0, line: 1}, name, handles, *uid, *idx), false).value
+                              },
+                            WriteBehaviour::None => panic!("Shouldn't be possible")
+                          }
+                        }).collect()
 }
 
   fn submodules(&self) -> Vec<ast::Module> {

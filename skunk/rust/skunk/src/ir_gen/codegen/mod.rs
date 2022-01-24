@@ -8,6 +8,7 @@ use inkwell::values::{FunctionValue, PointerValue, BasicValueEnum, IntValue};
 use super::ast;
 
 use std::convert::TryInto;
+use std::collections::hash_set::HashSet;
 
 use super::codegen_state::*;
 use super::state_values::*;
@@ -72,7 +73,15 @@ impl <'a> Typeable for ast::Module {
       sub_types.push(handle_type(cg, handle));
     }
     // a bitmap that describes which handles have updates
+    // TODO: size this based on number of handles
     sub_types.push(cg.context.i64_type().into());
+
+    // an optional field for tuple restructuring
+    // TODO: size this based on number of tuples
+    if self.tuples.len() > 0 {
+      sub_types.push(cg.context.i64_type().into());
+    }
+
     // a value for each param
     for value_param in &self.value_params {
       sub_types.push(param_type(cg, value_param));
@@ -95,7 +104,12 @@ pub fn codegen<'ctx>(context: &'ctx Context, constructor: &mut dyn CodegenStateC
   let mut cg = constructor.construct(context, &module.name);
   module_codegen(&mut cg, module)?;
   result.push(cg.module);
+  let mut seen_names = HashSet::<String>::new();
   for submodule in &module.submodules {
+    if seen_names.contains(&submodule.module.name) {
+      continue;
+    }
+    seen_names.insert(submodule.module.name.clone());
     let mut cg = constructor.construct(context, &submodule.module.name);
     module_codegen(&mut cg, &submodule.module)?;
     result.push(cg.module);
@@ -262,13 +276,18 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
       if let Some(local) = cg.get_local(&field) {
         Ok(local.value_type.clone())
       } else {
-        let h_type = module.type_for_field(&field).ok_or(CodegenError::BadReadFieldName(field.clone()))?;
+        let h_type = module.type_for_field(&field).unwrap(); //ok_or(CodegenError::BadReadFieldName(field.clone()))?;
         Ok(type_primitive_for_type(&h_type))
       }
     }
     ast::ExpressionValueEnum::Tuple(exprs) => {
       let tuple_contents = exprs.iter().map(|expr| expression_type(cg, module, expr)).flatten().flatten().collect();
-      Ok(vec!(TypePrimitive::PointerTo(tuple_contents)))
+      let size = type_size(&tuple_contents);
+      if size <= 16 {
+        Ok(tuple_contents)
+      } else {
+        Ok(vec!(TypePrimitive::PointerTo(tuple_contents)))
+      }
     }
     ast::ExpressionValueEnum::TupleLookup(expr, pos) => {
       let tuple_type = expression_type(cg, module, expr.as_ref())?;
@@ -297,6 +316,7 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
       }
     }    
     ast::ExpressionValueEnum::While(while_expr) => todo!("Implement while typing"),
+    _ => todo!("Need to implement typing for {:?}", expression.info),
   }
 }
 
