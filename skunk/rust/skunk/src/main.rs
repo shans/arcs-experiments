@@ -187,7 +187,7 @@ fn main() {
       let (target_triple, target_machine) = target_triple_and_machine();
       let context = Context::create();
 
-      let mut main_data = MainData::new();
+      let main_data = MainData::new();
       main_data.load_file("test.skunk").unwrap();
       let main = main_data.main_module_for_file("test.skunk").unwrap();
 

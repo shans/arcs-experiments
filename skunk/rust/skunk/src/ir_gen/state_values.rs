@@ -56,6 +56,7 @@ pub fn memregion_size_ptr<'ctx>(cg: &CodegenState<'ctx>, ptr: PointerValue<'ctx>
 //
 // So (Int, String) is vec!(Int, DynamicArrayOf(vec!(Char)))
 #[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum TypePrimitive {
   Int, Char, Bool, MemRegion, PointerTo(Vec<TypePrimitive>), FixedArrayOf(Vec<TypePrimitive>, u64), DynamicArrayOf(Vec<TypePrimitive>)
 }
@@ -63,6 +64,7 @@ pub enum TypePrimitive {
 // PointerKind describes operationally how a pointer should be treated. This includes an understanding of how to move values
 // between pointers, and how to inflate from a pointer to a StateValue
 #[derive(PartialEq, Debug)]
+#[allow(dead_code)]
 pub enum PointerKind {
   // Pointers to single values of size 1 word or smaller; the actual size is given by the LLVM pointer type used
   SimplePrimitive,
@@ -210,22 +212,11 @@ impl <'ctx> StatePointer<'ctx> {
       Ok(Self::new_from_type_primitive(ptr, vec!(ptr_type)))
     }
   }
-
-  pub fn default_value(&self, cg: &CodegenState<'ctx>) -> CodegenResult<StateValue> {
-    if self.pointer_type.len() != 1 {
-      todo!("handle default inline aggregate values");
-    }
-    match self.pointer_type[0] {
-      TypePrimitive::Int => Ok(StateValue::new_int(cg.uint_const(0))),
-      _ => todo!("handle default of this type")
-    }
-  }
 }
 
 #[derive(Debug, Clone)]
 pub enum ValueParts<'ctx> {
   None,
-  Suppress, // used to indicate a known terminated code-flow
   SimplePrimitive(BasicValueEnum<'ctx>),
   CompoundPrimitive(StructValue<'ctx>),
   DynamicMemRegion(PointerValue<'ctx>, IntValue<'ctx>),
@@ -245,6 +236,7 @@ impl <'ctx> StateValue<'ctx> {
   pub fn new_bool(value: IntValue<'ctx>) -> Self {
     StateValue::new_prim_of_type(value.into(), vec!(TypePrimitive::Bool))
   }
+  #[allow(dead_code)]
   pub fn new_true(cg: &CodegenState<'ctx>) -> Self {
     StateValue::new_bool(cg.context.bool_type().const_int(1, false))
   }
@@ -281,9 +273,6 @@ impl <'ctx> StateValue<'ctx> {
   pub fn new_none() -> Self {
     StateValue { value: ValueParts::None, value_type: Vec::new() }
   }
-  pub fn new_suppress() -> Self {
-    StateValue { value: ValueParts::Suppress, value_type: Vec::new() }
-  }
 
   pub fn into_int_value(&self) -> CodegenResult<IntValue<'ctx>> {
     if let ValueParts::SimplePrimitive(v) = self.value {
@@ -305,19 +294,11 @@ impl <'ctx> StateValue<'ctx> {
       ValueParts::SimplePrimitive(value) => value.get_type(),
       ValueParts::CompoundPrimitive(value) => value.get_type().into(),
       ValueParts::DynamicMemRegion(ptr, _) | ValueParts::StaticMemRegion(ptr) => ptr.get_type().into(),
-      ValueParts::None | ValueParts::Suppress => panic!("dunno!"),
+      ValueParts::None => panic!("dunno!"),
     }
   }
   pub fn is_none(&self) -> bool {
     if let ValueParts::None = self.value {
-      true
-    } else {
-      false
-    }
-  }
-
-  pub fn is_suppress(&self) -> bool {
-    if let ValueParts::Suppress = self.value {
       true
     } else {
       false
@@ -359,7 +340,7 @@ impl <'ctx> StateValue<'ctx> {
           _ => todo!("Implement debug for {:?}", value_type)
         }
       }
-      ValueParts::CompoundPrimitive(v) => {
+      ValueParts::CompoundPrimitive(_) => {
         printer.open_bracket(cg, "(")?;
         for type_idx in 0..self.value_type.len() {
           let value = self.get_tuple_index(cg, type_idx as u32).unwrap();
@@ -440,7 +421,6 @@ impl <'ctx> StateValue<'ctx> {
         }
       }
       ValueParts::None => Ok(()),
-      ValueParts::Suppress => panic!("Attempting to store in known-terminated code flow"),
     }
   }
   pub fn size(&self, cg: &CodegenState<'ctx>) -> CodegenResult<Self> {
@@ -454,7 +434,6 @@ impl <'ctx> StateValue<'ctx> {
       }
       ValueParts::StaticMemRegion(_) | ValueParts::CompoundPrimitive(_) => Ok(StateValue::new_int(cg.uint_const(type_size(&self.value_type)))),
       ValueParts::None => Err(CodegenError::InvalidFunctionArgument("Can't call size() on None result".to_string())),
-      ValueParts::Suppress => panic!("Attempting to size a known-terminated code flow"),
     }
   }
   pub fn array_lookup(&self, cg: &CodegenState<'ctx>, index: StateValue<'ctx>) -> CodegenResult<Self> {
@@ -584,17 +563,6 @@ impl <'ctx> StateValue<'ctx> {
 
   pub fn not_equals(&self, cg: &mut CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
     self.equals(cg, other)?.not(cg)
-  }
-
-  pub fn numeric_or(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {
-    let value_type = self.only_value_type()?;
-    let other_value_type = other.only_value_type()?;
-    if *value_type != TypePrimitive::Bool || *other_value_type != TypePrimitive::Bool {
-      Err(CodegenError::TypeMismatch("Can't use logical or on non-bools".to_string()))
-    } else {
-      let result = cg.builder.build_or(self.into_int_value()?, other.into_int_value()?, "logical-or");
-      Ok(StateValue::new_bool(result))
-    }
   }
 
   pub fn less_than(&self, cg: &CodegenState<'ctx>, other: &StateValue<'ctx>) -> CodegenResult<StateValue<'ctx>> {

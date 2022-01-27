@@ -68,7 +68,7 @@ pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Modul
       cg.builder.build_unconditional_branch(*cg.break_target.last().ok_or(CodegenError::NakedBreak)?);
       let junk_block = append_new_block(cg, "junk_block")?;
       cg.builder.position_at_end(junk_block);
-      Ok(StateValue::new_suppress())
+      Ok(StateValue::new_none())
     }
 
     ast::ExpressionValueEnum::ReferenceToState(field) => {
@@ -240,6 +240,8 @@ pub fn expression_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &ast::Modul
 
       Ok(StateValue::new_none())
     },
+    // It's useful to have this catch-all while implementing new expressions
+    #[allow(unreachable_patterns)]
     _ => todo!("Need to implement support for {:?}", expression.info),
   };
   cg.considering = old_considering;

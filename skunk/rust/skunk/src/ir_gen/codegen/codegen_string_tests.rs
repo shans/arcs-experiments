@@ -1,15 +1,48 @@
 use super::*;
 use super::super::super::parser;
 use super::tests::test_module;
-
-use inkwell::execution_engine::{JitFunction, ExecutionEngine};
 use super::super::super::graph_builder;
 use super::super::super::graph_to_module;
-use super::super::codegen_state::tests::*;
+
+use inkwell::execution_engine::{JitFunction, ExecutionEngine};
+use inkwell::passes::{PassManager, PassManagerBuilder};
+use inkwell::OptimizationLevel;
+
 use paste::paste;
+
+use std::collections::HashMap;
 use std::ptr;
 use std::io;
 use std::io::Write;
+
+pub struct JitInfo<'ctx> {
+  pub execution_engine: Option<ExecutionEngine<'ctx>>,
+}
+
+impl <'ctx> JitInfo<'ctx> {
+  pub fn new() -> JitInfo<'ctx> {
+    JitInfo { execution_engine: None }
+  }
+}
+
+impl <'ctx> CodegenStateConstructor<'ctx> for JitInfo<'ctx> {
+  fn construct(&mut self, context: &'ctx Context, name: &str) -> CodegenState<'ctx> {
+    let module = context.create_module(name);
+    match &self.execution_engine {
+      None => {
+        self.execution_engine = Some(module.create_jit_execution_engine(OptimizationLevel::None).unwrap());
+      }
+      Some(execution_engine) => {
+        execution_engine.add_module(&module).unwrap();
+      }
+    }
+    let builder = context.create_builder();
+    let pass_manager_builder = PassManagerBuilder::create();
+    let function_pass_manager = PassManager::create(&module);
+    pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
+    CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None, registered_strings: HashMap::new() }
+  }
+}
 
 fn ee_for_string<F>(module: &str, func: F) -> CodegenStatus
     where F: FnOnce(ExecutionEngine, &Module) -> () {
@@ -70,23 +103,32 @@ macro_rules! state_struct {
         )* )?
       } 
 
+      /** 
+       * These aliases are not necessarily used for every state_struct created,
+       * but they're useful to have.
+       */
+      #[allow(dead_code)]
       type [<$name Func>] = unsafe extern "C" fn(*mut [<$name State>]) -> ();
+      #[allow(dead_code)]
       type [<$name PrepFunc>] = unsafe extern "C" fn() -> *mut [<$name State>];
+      #[allow(dead_code)]
       type [<$name PrepVectorFunc>] = unsafe extern "C" fn(u64) -> *mut [<$name State>];
+      #[allow(dead_code)]
       type [<$name CheckFunc>] = unsafe extern "C" fn(*mut [<$name State>]) -> u64;
+      #[allow(dead_code)]
       type [<$name CheckVectorFunc>] = unsafe extern "C" fn(u64, *mut [<$name State>]) -> u64;
+      #[allow(dead_code)]
       type [<$name RunFunc>] = unsafe extern "C" fn() -> u64;
     }
   }
 }
-
-type u64Func = unsafe extern "C" fn() -> u64;
 
 #[macro_export]
 macro_rules! check_examples {
   ($name:ident, $defn:ident) => {
     paste! {
       #[test]
+      #[allow(non_snake_case)]
       fn [<check_examples_for_ $name>]() -> CodegenStatus {
         ee_for_string($defn, |ee: ExecutionEngine, _m| {
           unsafe {

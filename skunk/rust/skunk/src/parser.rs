@@ -7,10 +7,10 @@ use nom::{
   IResult,
   branch::alt,
   bytes::complete::{tag, is_a, take, take_until},
-  character::complete::{alpha1, char, multispace0, multispace1, digit1}, 
+  character::complete::{char, multispace0, multispace1, digit1}, 
   combinator::{verify, eof, cut, opt},
-  error::{Error, ErrorKind, VerboseError, VerboseErrorKind},
-  multi::{separated_list0, separated_list1, many0, many_till},
+  error::{VerboseError},
+  multi::{separated_list0, separated_list1, many0},
   sequence::{tuple, delimited, terminated, preceded},
 };
 
@@ -18,7 +18,6 @@ use nom_locate::{position, LocatedSpan};
 
 type Span<'a> = LocatedSpan<&'a str>;
 
-// use nom_supreme::error::ErrorTree;
 use ast::Safe;
 
 #[inline]
@@ -136,7 +135,7 @@ fn char_literal(i: Span) -> ParseResult<ast::Expression> {
 
 fn tuple_expression(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
-  let (i, mut members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression(0)), char(')'))(i)?;
+  let (i, members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression(0)), char(')'))(i)?;
   Ok((i, ast::Expression::tuple(position.safe(), members)))
 }
 
@@ -212,7 +211,7 @@ fn consume_modifiers<'a>(i: Span<'a>, expr: ast::Expression, precedence: usize) 
 }
 
 fn block_expression(i: Span) -> ParseResult<ast::Expression> {
-  let(i, block_position) = position(i)?;
+  let (i, block_position) = position(i)?;
   let (i, (_, _, mut expressions, _, unterm, _, _)) = tuple((
     char('{'),
     multispace0,
@@ -222,12 +221,14 @@ fn block_expression(i: Span) -> ParseResult<ast::Expression> {
     multispace0,
     cut(char('}'))
   ))(i)?;
-  if let Some(expr) = unterm {
-    expressions.push(expr);
-  } else {
-    let (i, position) = position(i)?;
-    expressions.push(ast::Expression::empty(position.safe()));
-  }
+  let i = if let Some(expr) = unterm {
+      expressions.push(expr);
+      i
+    } else {
+      let (i, position) = position(i)?;
+      expressions.push(ast::Expression::empty(position.safe()));
+      i
+    };
   Ok((i, ast::Expression::block(block_position.safe(), expressions)))
 }
 
@@ -512,13 +513,11 @@ pub fn parse<'a>(i: &'a str) -> ParseResult<Vec<ast::TopLevel>> {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use super::ast::Expr;
+pub mod tests {
+  pub mod expression_builder;
 
-  fn mk_error<I, O>(msg: I, code: ErrorKind) -> IResult<I, O> {
-    Err(nom::Err::Error(Error { input: msg, code }))
-  }
+  use super::*;
+  use expression_builder::Expr;
 
   #[test]
   fn parse_uppercase_names() {
@@ -526,7 +525,6 @@ mod tests {
     assert_eq!(uppercase_name(Span::new("Hello2")).unwrap().1.fragment(), &"Hello2");
     assert_eq!(uppercase_name(Span::new("TesT other")).unwrap().1.fragment(), &"TesT");
     assert_eq!(uppercase_name(Span::new("NAmE!other")).unwrap().1.fragment(), &"NAmE");
-    // assert_eq!(uppercase_name("hello"), mk_error("hello", ErrorKind::Verify));
   }
 
   #[test]

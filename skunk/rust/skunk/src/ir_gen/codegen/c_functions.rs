@@ -43,6 +43,7 @@ fn get_memcmp<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
   }).unwrap()
 }
 
+#[allow(dead_code)]
 pub fn get_snprintf<'ctx>(cg: &mut CodegenState<'ctx>) -> FunctionValue<'ctx> {
   cg.module.get_function("snprintf").or_else(|| {
     let function_type = cg.context.i32_type().fn_type(&[cg.char_ptr_type().into(), cg.context.i32_type().into(), cg.char_ptr_type().into()], true);

@@ -184,7 +184,9 @@ fn module_init_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Mod
 
 fn module_update_function<'ctx, 'a>(cg: &CodegenState<'ctx>, module: &ast::Module) -> CodegenStatus {
   // Compute a trigger mask - we only need to trigger when a listener is installed on a handle
-  // TODO: we don't actually use this..
+  // TODO: we don't actually use this.. if we did, we'd test the update pointer against the 
+  // trigger mask, and early-return (+ clear update pointer) if there was no overlap. Is it worth doing?
+  #[allow(unused_variables)]
   let mut trigger_mask: u64 = 0;
   for listener in module.listeners.iter() {
     let idx = module.idx_for_field(&listener.trigger);
@@ -295,7 +297,7 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
     ast::ExpressionValueEnum::Let(let_expression) => {
       expression_type(cg, module, let_expression.expression.as_ref())
     }
-    ast::ExpressionValueEnum::If(if_expression) => todo!("Implement if expression typing"),
+    ast::ExpressionValueEnum::If(_if_expression) => todo!("Implement if expression typing"),
 
     ast::ExpressionValueEnum::Empty => Ok(Vec::new()),
     //TODO: This is wrong if while loops have non-none type.
@@ -365,7 +367,7 @@ fn expression_type<'ctx>(cg: &CodegenState<'ctx>, module: &ast::Module, expressi
         _ => todo!("Implement binary operation typing for {:?}", op)
       }
     }    
-    ast::ExpressionValueEnum::While(while_expr) => todo!("Implement while typing"),
+    ast::ExpressionValueEnum::While(_while_expr) => todo!("Implement while typing"),
     _ => todo!("Need to implement typing for {:?}", expression.info),
   }
 }
@@ -380,6 +382,7 @@ fn invoke_submodule<'ctx>(cg: &CodegenState<'ctx>, submodule: &ast::Module, subm
   Ok(())
 }
 
+#[allow(dead_code)]
 pub fn debug_str<'ctx>(cg: &CodegenState<'ctx>, s: &str) {
   let printf = get_printf(cg);
   let sk_str = cg.builder.build_global_string_ptr(&("skunk> ".to_string() + s), "sk_str").as_pointer_value();
@@ -450,7 +453,7 @@ mod tests {
   use super::super::super::target_triple_and_machine;
 
 
-  use super::super::super::ast::Expr;
+  use super::super::super::parser::tests::expression_builder::Expr;
   use super::super::super::parser;
 
   pub fn test_module<'a>() -> ast::Module {
