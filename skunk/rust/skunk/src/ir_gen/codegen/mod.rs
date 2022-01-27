@@ -118,6 +118,10 @@ pub fn codegen<'ctx>(context: &'ctx Context, constructor: &mut dyn CodegenStateC
 }
 
 pub fn module_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Module) -> CodegenStatus {
+ module_init_codegen(cg, module)?;
+
+  //module_deinit_codegen(cg, module)?;
+
   for listener in module.listeners.iter() {
     listener_codegen(cg, module, listener)?;
   }
@@ -129,7 +133,53 @@ pub fn module_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Modu
 
   // TODO: Gate producing this on test compilation mode
   examples_codegen(cg, module)
+}
 
+fn module_init_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast::Module) -> CodegenStatus {
+  let module_type = module.ir_type(cg).into_struct_type();
+  let module_ptr_type = module_type.ptr_type(AddressSpace::Generic);
+  let function_type = module_ptr_type.fn_type(&[], false);
+  let function = cg.module.add_function(&format!("{}_init", module.name), function_type, None);
+
+  let entry_block = cg.context.append_basic_block(function, "entry");
+  cg.builder.position_at_end(entry_block);
+
+  // allocate & clear space
+  let module_size = module_type.size_of().unwrap();
+  let module_size32 = cg.builder.build_int_cast(module_size, cg.context.i32_type(), "module_size32");
+  let state_ptr_as_char_ptr = malloc(cg, module_size32.into(), "malloced-state").into_pointer_value();
+  memset(cg, state_ptr_as_char_ptr, cg.context.i8_type().const_zero(), module_size32);
+  let state_ptr = cg.builder.build_bitcast(state_ptr_as_char_ptr, module_ptr_type, "state_ptr").into_pointer_value();
+
+  for submodule_idx in 0..module.submodules.len() {
+    let submodule = &module.submodules[submodule_idx];
+    // init submodule
+    let submodule_init_fn_name = format!("{}_init", &submodule.module.name);
+    let submodule_init_fn = cg.module.get_function(&submodule_init_fn_name).or_else(|| {
+      let function_type = submodule.module.ir_type(cg).into_struct_type().ptr_type(AddressSpace::Generic).fn_type(&[], false);
+      Some(cg.module.add_function(&submodule_init_fn_name, function_type, None))
+    }).unwrap();
+    let submodule_state = cg.builder.build_call(submodule_init_fn, &[], "ptr_to_submodule_state").try_as_basic_value().left().unwrap().into_pointer_value();
+    let submodule_struct = cg.builder.build_load(submodule_state, "struct");
+    let submodule_state_ptr = cg.submodule_ptr(module, state_ptr, submodule_idx)?;
+    cg.builder.build_store(submodule_state_ptr, submodule_struct);
+
+    // set generic params for submodule
+    for idx in 0..submodule.params.params.len() {
+      let param_expr = &submodule.params.params[idx];
+      let field_info = &submodule.module.value_params[idx];
+      let submodule_alloca = cg.builder.build_alloca(submodule.module.ir_type(cg).into_struct_type().ptr_type(AddressSpace::Generic), "alloca");
+      let param_ptr = cg.read_ptr_for_field(&submodule.module, submodule_state_ptr, &field_info.name)?;
+      // TODO: Should the expression run in the context of the parent module or the submodule? Parent module might almost make more sense.
+      // The main purpose would be to let params be computed from parent module params. However, note that this would require
+      // that params be set as a second pass.
+      let result = expression_codegen(cg, &submodule.module, submodule_alloca, &param_expr.value)?;
+      result.store(cg, &param_ptr)?;
+    }
+  }
+
+  cg.builder.build_return(Some(&state_ptr));
+  Ok(())  
 }
 
 fn module_update_function<'ctx, 'a>(cg: &CodegenState<'ctx>, module: &ast::Module) -> CodegenStatus {

@@ -26,11 +26,15 @@ module Pair {
   result: writes (Int, Int);
   error: writes Error;
 
-  $a:UnsignedInt -> Spaces -> $b:UnsignedInt;
+  $a:UnsignedInt -> Char<','> -> Spaces -> $b:UnsignedInt;
   ($a, $b) -> result;
 
   examples {
-    !input: ("3 4", 0) -> result: (3, 4);
-    !input: ("3 hat", 0) -> error: 1;
+    !input: ("3, 4", 0) -> result: (3, 4);
+    !input: ("3,   4", 0) -> result: (3, 4);
+    !input: ("3, hat", 0) -> error: 1;
+    !input: ("3. 4", 0) -> error: 1;
+    !input: ("3.. 4", 0) -> error: 1;
+    !input: ("3", 0) -> error: 1;
   }
 }

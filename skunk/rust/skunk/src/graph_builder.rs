@@ -37,7 +37,7 @@ pub fn add_graph(graph: &mut graph::Graph, ast: &ast::GraphDirective) {
 
 pub fn add_graph_module_info(graph: &mut graph::Graph, info: &ast::GraphModuleInfo) -> graph::Endpoint {
   match info {
-    ast::GraphModuleInfo::Module(specifier) => graph.add_module(specifier),
+    ast::GraphModuleInfo::Module(specifier, params) => graph.add_module(specifier, params),
     ast::GraphModuleInfo::Tuple(specifiers) => {
       let endpoints = specifiers.iter().map(|s| add_graph_module_info(graph, s));
       let simple_endpoints = endpoints.map(|e| {
@@ -147,8 +147,8 @@ fn expand_to_full_connection(modules: &Vec<&ast::Module>, graph: &mut graph::Gra
       assert!(sub_types.len() == connections.len());
       for idx in 0..connections.len() {
         let from_module_idx = connections[idx].module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(conn_from.clone()))?;
-        let from_module = find_module_by_name(modules, &graph.modules[from_module_idx]).ok_or(
-          GraphBuilderError::ModuleNotFound(graph.modules[from_module_idx].clone()))?;
+        let from_module = find_module_by_name(modules, &graph.modules[from_module_idx].name).ok_or(
+          GraphBuilderError::ModuleNotFound(graph.modules[from_module_idx].name.clone()))?;
         let (from_name, _compatible_type) = only_connection_matching_type(from_module, &sub_types[idx]);
         let from_connection = graph.add_connection(from_name);
         let conn_from = graph::Endpoint::Simple(connections[idx]);
@@ -164,10 +164,10 @@ fn expand_to_full_connection(modules: &Vec<&ast::Module>, graph: &mut graph::Gra
 
   let from_module_idx = conn_from.module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(conn_from.clone()))?;
   let to_module_idx = conn_to.module_idx().ok_or(GraphBuilderError::NotModuleEndpoint(conn_to.clone()))?;
-  let from_module = find_module_by_name(modules, &graph.modules[from_module_idx]).ok_or(
-    GraphBuilderError::ModuleNotFound(graph.modules[from_module_idx].clone()))?;
-  let to_module = find_module_by_name(modules, &graph.modules[to_module_idx]).ok_or(
-    GraphBuilderError::ModuleNotFound(graph.modules[to_module_idx].clone()))?;
+  let from_module = find_module_by_name(modules, &graph.modules[from_module_idx].name).ok_or(
+    GraphBuilderError::ModuleNotFound(graph.modules[from_module_idx].name.clone()))?;
+  let to_module = find_module_by_name(modules, &graph.modules[to_module_idx].name).ok_or(
+    GraphBuilderError::ModuleNotFound(graph.modules[to_module_idx].name.clone()))?;
   let (from_name, to_name, compatible_type) = only_matching_connection(from_module, to_module);
   let from_connection = graph.add_connection(from_name);
   graph.connect(conn_from, &from_connection);

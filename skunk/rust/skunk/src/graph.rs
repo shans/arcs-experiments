@@ -1,5 +1,5 @@
 
-use super::ast::{Type, ModuleSpecifier};
+use super::ast::{Type, ModuleSpecifier, ParamAssignment};
 
 use std::collections::hash_map::HashMap;
 use std::slice::from_ref;
@@ -103,8 +103,20 @@ pub struct Arrow {
 }
 
 #[derive(Debug)]
+pub struct GraphModule {
+  pub name: String,
+  pub params: ParamAssignment
+}
+
+impl GraphModule {
+  pub fn create(name: &str, params: &ParamAssignment) -> Self { 
+    GraphModule { name: name.to_string(), params: params.clone() }
+  }
+}
+
+#[derive(Debug)]
 pub struct Graph {
-  pub modules: Vec<String>,
+  pub modules: Vec<GraphModule>,
   pub connections: Vec<String>,
   pub handles: Vec<Handle>,
   arrows: Vec<Arrow>,
@@ -116,13 +128,13 @@ impl Graph {
     Graph { modules: Vec::new(), connections: Vec::new(), handles: Vec::new(), arrows: Vec::new(), names: HashMap::new() }
   }
 
-  pub fn add_module(&mut self, module_name: &ModuleSpecifier) -> Endpoint {
+  pub fn add_module(&mut self, module_name: &ModuleSpecifier, params: &ParamAssignment) -> Endpoint {
     let mut idx = self.modules.len();
     match module_name {
       ModuleSpecifier::This => todo!("Probably this doesn't make sense?"),
-      ModuleSpecifier::Module(name) => self.modules.push(name.to_string()),
+      ModuleSpecifier::Module(name) => self.modules.push(GraphModule::create(name, params)),
       ModuleSpecifier::NamedModule(local_name, name) => {
-        self.modules.push(name.to_string());
+        self.modules.push(GraphModule::create(name, params));
         self.names.insert(local_name.clone(), idx);
       }
       ModuleSpecifier::Name(local_name) => idx = *self.names.get(local_name).unwrap()
@@ -229,8 +241,8 @@ mod tests {
   #[test]
   fn filter_module_to_module_connections_works() {
     let mut graph = Graph::new();
-    let m0 = graph.add_module(&ModuleSpecifier::Module("mod1".to_string()));
-    let m1 = graph.add_module(&ModuleSpecifier::Module("mod2".to_string()));
+    let m0 = graph.add_module(&ModuleSpecifier::Module("mod1".to_string()), &ParamAssignment::empty());
+    let m1 = graph.add_module(&ModuleSpecifier::Module("mod2".to_string()), &ParamAssignment::empty());
     let c0 = graph.add_connection("c0");
     graph.connect(&m0, &m1);
     graph.connect(&m0, &c0);

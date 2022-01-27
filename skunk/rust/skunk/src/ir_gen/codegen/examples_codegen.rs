@@ -153,11 +153,16 @@ pub fn example_prep_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx ast
   let function = cg.module.add_function(&prep_function_name, prep_function_type, None);
   let entry_block = cg.context.append_basic_block(function, "entry");
   cg.builder.position_at_end(entry_block);
+
+  /*
   let module_size = module_type.size_of().unwrap();
   let module_size32 = cg.builder.build_int_cast(module_size, cg.context.i32_type(), "module_size32");
   let state_ptr_as_char_ptr = malloc(cg, module_size32.into(), "malloced-state").into_pointer_value();
   memset(cg, state_ptr_as_char_ptr, cg.context.i8_type().const_zero(), module_size32);
   let state_ptr = cg.builder.build_bitcast(state_ptr_as_char_ptr, module_ptr_type, "state_ptr").into_pointer_value();
+  */
+  let init_fn = cg.module.get_function(&format!("{}_init", &module.name)).unwrap();
+  let state_ptr = cg.builder.build_call(init_fn, &[], "state_ptr").try_as_basic_value().left().unwrap().into_pointer_value();
   let state_alloca = cg.builder.build_alloca(module_ptr_type, "state_alloca");
   cg.builder.build_store(state_alloca, state_ptr);
 

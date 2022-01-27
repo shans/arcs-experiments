@@ -342,7 +342,8 @@ pub struct Listener {
 #[derive(Debug, PartialEq, Clone)]
 pub struct ModuleInfo {
   pub module: Module,
-  pub handle_map: HashMap<String, String>
+  pub handle_map: HashMap<String, String>,
+  pub params: ParamAssignment,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -496,18 +497,33 @@ pub enum ModuleSpecifier {
 }
 
 #[derive(Debug, PartialEq, Clone)]
+pub struct ParamAssignment {
+  pub params: Vec<Expression>
+}
+
+impl ParamAssignment {
+  pub fn empty() -> Self {
+    ParamAssignment { params: vec!() }
+  }
+}
+
+#[derive(Debug, PartialEq, Clone)]
 pub enum GraphModuleInfo {
-  Module(ModuleSpecifier),
+  Module(ModuleSpecifier, ParamAssignment),
   Field(ModuleSpecifier, String),
   Tuple(Vec<GraphModuleInfo>),
 }
 
 impl GraphModuleInfo {
-  pub fn module(name: &str, local_name: Option<&str>) -> GraphModuleInfo {
+  pub fn module(name: &str, local_name: Option<&str>, params: Vec<Expression>) -> GraphModuleInfo {
+    let params = ParamAssignment { params };
     match local_name {
-      None => GraphModuleInfo::Module(ModuleSpecifier::Module(name.to_string())),
-      Some(local_name) => GraphModuleInfo::Module(ModuleSpecifier::NamedModule(local_name.to_string(), name.to_string()))
+      None => GraphModuleInfo::Module(ModuleSpecifier::Module(name.to_string()), params),
+      Some(local_name) => GraphModuleInfo::Module(ModuleSpecifier::NamedModule(local_name.to_string(), name.to_string()), params)
     }
+  }
+  pub fn module_name(name: &str) -> GraphModuleInfo {
+    GraphModuleInfo::Module(ModuleSpecifier::Name(name.to_string()), ParamAssignment { params: vec!() })
   }
 }
 

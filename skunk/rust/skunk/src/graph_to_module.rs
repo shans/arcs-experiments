@@ -13,14 +13,16 @@ pub enum GraphToModuleError {
 #[derive(Debug)]
 pub struct ModuleInfo<'a> {
   pub index: usize,
-  pub module: &'a ast::Module
+  pub module: &'a ast::Module,
+  pub params: ast::ParamAssignment
 }
 
 impl <'a> ModuleInfo<'a> {
   fn new(graph: &graph::Graph, modules: &Vec<&'a ast::Module>, index: usize) -> Result<ModuleInfo<'a>, GraphToModuleError> {
-    let module_name = &graph.modules[index];
+    let module_name = &graph.modules[index].name;
+    let params = &graph.modules[index].params;
     let module = graph_builder::find_module_by_name(modules, module_name).ok_or_else(|| GraphToModuleError::NameNotInModuleList(module_name.clone()))?;
-    let result = ModuleInfo { index, module };
+    let result = ModuleInfo { index, module, params: params.clone() };
     Ok(result)
   }
 }
@@ -50,7 +52,8 @@ pub struct HandleInfo {
 pub fn graph_to_module(module: &mut ast::Module, graph: graph::Graph, modules: Vec<&ast::Module>) -> Result<(), GraphToModuleError> {
   let module_context = ModuleContext::new(graph, modules)?;
   let mut handle_infos = module_context.generate_handles(&mut module.tuples)?;
-  let mut submodules: Vec<ast::ModuleInfo> = module_context.submodules().drain(..).map(|module| ast::ModuleInfo { module, handle_map: HashMap::new() }).collect();
+  let mut submodules: Vec<ast::ModuleInfo> = 
+    module_context.submodules().drain(..).map(|(module, params)| ast::ModuleInfo { module, handle_map: HashMap::new(), params }).collect();
   for handle_info in &handle_infos {
     for idx in &handle_info.mapped_for_submodules {
       submodules[idx.submodule_idx].handle_map.insert(idx.submodule_handle.clone(), handle_info.handle.name.clone());
@@ -130,7 +133,7 @@ impl <'a> ModuleContext<'a> {
         let module = candidate_modules[0].0;
         // .. and retrieve the actual module info from the modules list
         let candidate_writes_to_submodule = module.module_idx().unwrap();
-        let submodule_name = &self.graph.modules[candidate_writes_to_submodule];
+        let submodule_name = &self.graph.modules[candidate_writes_to_submodule].name;
         let submodule = self.find_module_by_name(&submodule_name).ok_or_else(|| GraphToModuleError::NameNotInModuleList(submodule_name.clone()))?;
         let connection_name = &self.graph.connections[connection_idx];
         let submodule_connection = submodule.handle_for_field(connection_name).ok_or_else(|| GraphToModuleError::NameNotInHandleList(submodule.clone(), connection_name.clone()))?;
@@ -267,8 +270,8 @@ impl <'a> ModuleContext<'a> {
                         }).collect()
 }
 
-  fn submodules(&self) -> Vec<ast::Module> {
+  fn submodules(&self) -> Vec<(ast::Module, ast::ParamAssignment)> {
     // clone modules so the final data structure doesn't refer into the provided module list.
-    self.module_infos.iter().map(|info| info.module.clone()).collect()
+    self.module_infos.iter().map(|info| (info.module.clone(), info.params.clone())).collect()
   }
 }

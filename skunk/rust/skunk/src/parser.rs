@@ -408,7 +408,7 @@ fn module_graphs(i: Span) -> ParseResult<Vec<ast::GraphDirective>> {
 }
 
 fn graph_module_specifier(i: Span) -> ParseResult<ast::GraphModuleInfo> {
-  let (i, (local_name, module_name, _)) =
+  let (i, (local_name, module_name, params)) =
   tuple((
     opt(delimited(char('$'), name, tuple((multispace0, char(':'), multispace0)))),
     uppercase_name,
@@ -418,7 +418,8 @@ fn graph_module_specifier(i: Span) -> ParseResult<ast::GraphModuleInfo> {
       tuple((multispace0, char('>')))
     ))
   ))(i)?;
-  Ok((i, ast::GraphModuleInfo::module(module_name.fragment(), local_name.map(|name| *name.fragment()))))
+  let params = params.unwrap_or(vec!());
+  Ok((i, ast::GraphModuleInfo::module(module_name.fragment(), local_name.map(|name| *name.fragment()), params)))
 }
 
 fn graph_module_tuple(i: Span) -> ParseResult<ast::GraphModuleInfo> {
@@ -432,7 +433,7 @@ fn graph_module_tuple(i: Span) -> ParseResult<ast::GraphModuleInfo> {
 
 fn graph_name_specifier(i: Span) -> ParseResult<ast::GraphModuleInfo> {
   let (i, name) = preceded(char('$'), name)(i)?;
-  Ok((i, ast::GraphModuleInfo::Module(ast::ModuleSpecifier::Name(name.to_string()))))
+  Ok((i, ast::GraphModuleInfo::module_name(name.fragment())))
 }
 
 fn field_specifier(i: Span) -> ParseResult<ast::GraphModuleInfo> {
@@ -654,7 +655,7 @@ mod tests {
   static TEST_GRAPH_STRING : &str = "MyModule -> MyModule2 -> AnotherModule;";
  
   fn gmi(name: &str) -> ast::GraphModuleInfo {
-    ast::GraphModuleInfo::module(name, None)
+    ast::GraphModuleInfo::module(name, None, vec!())
   }
 
   fn test_graph_result() -> ast::GraphDirective {
@@ -704,8 +705,8 @@ mod tests {
     assert_eq!(
       graph_module_tuple(Span::new(&test_str)).unwrap().1,
       ast::GraphModuleInfo::Tuple(vec!(
-        ast::GraphModuleInfo::Module(ast::ModuleSpecifier::Module("Module1".to_string())),
-        ast::GraphModuleInfo::Module(ast::ModuleSpecifier::Module("Module2".to_string())),
+        ast::GraphModuleInfo::module("Module1", None, vec!()),
+        ast::GraphModuleInfo::module("Module2", None, vec!()),
       ))
     );
   }
