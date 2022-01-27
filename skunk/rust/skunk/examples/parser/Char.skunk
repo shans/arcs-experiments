@@ -1,0 +1,26 @@
+uses UnsignedInt;
+uses Spaces;
+
+type Error = Int;
+
+module Char<char: Char> {
+  input: reads (String, Int);
+  output: writes (String, Int);
+  error: writes Error;
+
+  input.onChange: {
+    if input.0[input.1] == char {
+      output <- (input.0, input.1 + 1);
+    }
+    error <- 1;
+  }
+
+  examples {
+    char: 'a', !input: ("aa", 0) -> output: ("aa", 1);
+    char: 'a', !input: ("ab", 0) -> output: ("ab", 1);
+    char: 'b', !input: ("ab", 1) -> output: ("ab", 2);
+    char: 'b', !input: ("aa", 0) -> error: 1;
+    char: 'a', !input: ("", 0) -> error: 1;
+    char: 'a', !input: ("a", 1) -> error: 1;
+  }
+}
