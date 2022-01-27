@@ -1,0 +1,3 @@
+                        Runs interpreter on ./test.skunk
+-h | help | --help      Display this help message
+examples file_path      Build examples found in the module at file_path

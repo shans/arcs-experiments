@@ -176,35 +176,41 @@ impl FileData {
   }
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const USAGE: &str = include_str!("../USAGE");
+
 fn main() {
-  let args: Vec<String> = env::args().collect();
+  let command = env::args().nth(1);
 
-  if args.len() > 2 && args[1] == "examples" {
-    let file = &args[2];
-    let mut main_data = MainData::new();
-    build_test_examples(&mut main_data, file).unwrap();
-    return;
+  match command.as_deref() {
+    None => {
+      let (target_triple, target_machine) = target_triple_and_machine();
+      let context = Context::create();
+
+      let mut main_data = MainData::new();
+      main_data.load_file("test.skunk").unwrap();
+      let main = main_data.main_module_for_file("test.skunk").unwrap();
+
+      let mut target_info = ir_gen::codegen_state::TargetInfo { target_machine: &target_machine, target_triple: &target_triple };
+      let cg_modules = ir_gen::codegen(&context, &mut target_info, &main).unwrap();
+
+      for module in cg_modules {
+        let name = module.get_name().to_str().unwrap();
+        println!("Outputting object file for {}", name);
+        // module.print_to_stderr();
+        let object_name = name.to_string() + ".o";
+        let path = Path::new(&object_name);
+        target_machine.write_to_file(&module, FileType::Object, path).unwrap();
+      }
+    },
+    Some("-h" | "--help" | "help") => eprintln!("skunk - {}\n{}", VERSION, USAGE),
+    Some("examples") => {
+        let file = &env::args().nth(2).expect("missing example path");
+        let mut main_data = MainData::new();
+        build_test_examples(&mut main_data, file).unwrap();
+      },
+    Some(command) => panic!("Unknown command '{}'", command),
   }
-
-  let (target_triple, target_machine) = target_triple_and_machine();
-  let context = Context::create();
-
-  let mut main_data = MainData::new();
-  main_data.load_file("test.skunk").unwrap();
-  let main = main_data.main_module_for_file("test.skunk").unwrap();
-
-  let mut target_info = ir_gen::codegen_state::TargetInfo { target_machine: &target_machine, target_triple: &target_triple };
-  let cg_modules = ir_gen::codegen(&context, &mut target_info, &main).unwrap();
-
-  for module in cg_modules {
-    let name = module.get_name().to_str().unwrap();
-    println!("Outputting object file for {}", name);
-    // module.print_to_stderr();
-    let object_name = name.to_string() + ".o";
-    let path = Path::new(&object_name);
-    target_machine.write_to_file(&module, FileType::Object, path).unwrap();
-  }
-
 }
 
 
