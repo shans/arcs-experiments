@@ -1,1 +1,2 @@
 skunk/rust/skunk/target
+*.skunk_examples
