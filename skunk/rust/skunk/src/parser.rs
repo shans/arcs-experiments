@@ -7,10 +7,10 @@ use nom::{
   IResult,
   branch::alt,
   bytes::complete::{tag, is_a, take, take_until},
-  character::complete::{alpha1, char, multispace0, multispace1, digit1}, 
+  character::complete::{char, multispace0, multispace1, digit1}, 
   combinator::{verify, eof, cut, opt},
-  error::{Error, ErrorKind, VerboseError, VerboseErrorKind},
-  multi::{separated_list0, separated_list1, many0, many_till},
+  error::{VerboseError},
+  multi::{separated_list0, separated_list1, many0},
   sequence::{tuple, delimited, terminated, preceded},
 };
 
@@ -18,7 +18,6 @@ use nom_locate::{position, LocatedSpan};
 
 type Span<'a> = LocatedSpan<&'a str>;
 
-// use nom_supreme::error::ErrorTree;
 use ast::Safe;
 
 #[inline]
@@ -136,7 +135,7 @@ fn char_literal(i: Span) -> ParseResult<ast::Expression> {
 
 fn tuple_expression(i: Span) -> ParseResult<ast::Expression> {
   let (i, position) = position(i)?;
-  let (i, mut members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression(0)), char(')'))(i)?;
+  let (i, members) = delimited(char('('), separated_list1(tuple((multispace0, char(','), multispace0)), expression(0)), char(')'))(i)?;
   Ok((i, ast::Expression::tuple(position.safe(), members)))
 }
 
@@ -212,7 +211,7 @@ fn consume_modifiers<'a>(i: Span<'a>, expr: ast::Expression, precedence: usize) 
 }
 
 fn block_expression(i: Span) -> ParseResult<ast::Expression> {
-  let(i, block_position) = position(i)?;
+  let (i, block_position) = position(i)?;
   let (i, (_, _, mut expressions, _, unterm, _, _)) = tuple((
     char('{'),
     multispace0,
@@ -222,12 +221,14 @@ fn block_expression(i: Span) -> ParseResult<ast::Expression> {
     multispace0,
     cut(char('}'))
   ))(i)?;
-  if let Some(expr) = unterm {
-    expressions.push(expr);
-  } else {
-    let (i, position) = position(i)?;
-    expressions.push(ast::Expression::empty(position.safe()));
-  }
+  let i = if let Some(expr) = unterm {
+      expressions.push(expr);
+      i
+    } else {
+      let (i, position) = position(i)?;
+      expressions.push(ast::Expression::empty(position.safe()));
+      i
+    };
   Ok((i, ast::Expression::block(block_position.safe(), expressions)))
 }
 
@@ -512,13 +513,11 @@ pub fn parse<'a>(i: &'a str) -> ParseResult<Vec<ast::TopLevel>> {
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use super::ast::Expr;
+pub mod tests {
+  pub mod expression_builder;
 
-  fn mk_error<I, O>(msg: I, code: ErrorKind) -> IResult<I, O> {
-    Err(nom::Err::Error(Error { input: msg, code }))
-  }
+  use super::*;
+  use expression_builder::ExpressionBuilder;
 
   #[test]
   fn parse_uppercase_names() {
@@ -526,7 +525,6 @@ mod tests {
     assert_eq!(uppercase_name(Span::new("Hello2")).unwrap().1.fragment(), &"Hello2");
     assert_eq!(uppercase_name(Span::new("TesT other")).unwrap().1.fragment(), &"TesT");
     assert_eq!(uppercase_name(Span::new("NAmE!other")).unwrap().1.fragment(), &"NAmE");
-    // assert_eq!(uppercase_name("hello"), mk_error("hello", ErrorKind::Verify));
   }
 
   #[test]
@@ -548,7 +546,7 @@ mod tests {
   fn parse_function() {
     assert_eq!(
       function(Span::new("foo(bar)")).unwrap().1, 
-      ast::Expression::unterminated(Expr::fun(0, 0, "foo", Expr::sref(4, 0, "bar")).build())
+      ast::Expression::unterminated(ExpressionBuilder::fun(0, 0, "foo", ExpressionBuilder::sref(4, 0, "bar")).build())
     );
   }
 
@@ -591,7 +589,7 @@ mod tests {
     assert_eq!(
       listener(Span::new("foo.onChange: bar <- far;")).unwrap().1,
       ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: 
-        Expr::output(14, 0, "bar", Expr::sref(7, 0, "far")).build()
+        ExpressionBuilder::output(14, 0, "bar", ExpressionBuilder::sref(7, 0, "far")).build()
       }
     )
   }
@@ -602,7 +600,7 @@ mod tests {
       listener(Span::new("foo.onChange: {\n  bar <- far;\n  }")).unwrap().1,
 
       ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: 
-        Expr::block(14, 0, vec!(Expr::output(4, 1, "bar", Expr::sref(7, 0, "far")), Expr::empty(19, 2))).build()
+        ExpressionBuilder::block(14, 0, vec!(ExpressionBuilder::output(4, 1, "bar", ExpressionBuilder::sref(7, 0, "far")), ExpressionBuilder::empty(19, 2))).build()
       }
     )
   }
@@ -615,10 +613,10 @@ mod tests {
                            far.onWrite: bax <- fax;")).unwrap().1,
       vec!(
         ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation: 
-          Expr::output(14, 0, "bar", Expr::sref(7, 0, "far")).build()
+          ExpressionBuilder::output(14, 0, "bar", ExpressionBuilder::sref(7, 0, "far")).build()
         },
         ast::Listener { trigger: String::from("far"), kind: ast::ListenerKind::OnWrite, implementation:
-          Expr::output(66, 1, "bax", Expr::sref(7, 0, "fax")).build()
+          ExpressionBuilder::output(66, 1, "bax", ExpressionBuilder::sref(7, 0, "fax")).build()
         }
       )
     )
@@ -643,7 +641,7 @@ mod tests {
         }
       ),
       vec!(ast::Listener { trigger: String::from("foo"), kind: ast::ListenerKind::OnChange, implementation:
-        Expr::output(offset + 62, line + 2, "bar", Expr::fun(7, 0, "far", Expr::sref(4, 0, "la"))).build()
+        ExpressionBuilder::output(offset + 62, line + 2, "bar", ExpressionBuilder::fun(7, 0, "far", ExpressionBuilder::sref(4, 0, "la"))).build()
       }), 
       Vec::new(),
       ast::Examples { examples: Vec::new() },
@@ -715,39 +713,39 @@ mod tests {
   fn parse_expression_test() {
     assert_eq!(
       expression(0)(Span::new("foo || bar")).unwrap().1.value,
-      Expr::sref(0, 0, "foo").op(4, 0, ast::Operator::LogicalOr, Expr::sref(3, 0, "bar")).build()
+      ExpressionBuilder::sref(0, 0, "foo").op(4, 0, ast::Operator::LogicalOr, ExpressionBuilder::sref(3, 0, "bar")).build()
     );
     assert_eq!(
       expression(0)(Span::new("foo || bar == far > baz")).unwrap().1.value,
-      Expr::sref(0, 0, "foo").op(4, 0, ast::Operator::LogicalOr, 
-        Expr::sref(3, 0, "bar").op(4, 0, ast::Operator::Equality,
-          Expr::sref(3, 0, "far")
+      ExpressionBuilder::sref(0, 0, "foo").op(4, 0, ast::Operator::LogicalOr, 
+        ExpressionBuilder::sref(3, 0, "bar").op(4, 0, ast::Operator::Equality,
+          ExpressionBuilder::sref(3, 0, "far")
         ).op(7, 0, ast::Operator::GreaterThan, 
-          Expr::sref(2, 0, "baz")
+          ExpressionBuilder::sref(2, 0, "baz")
         )
       ).build()
     );
     assert_eq!(
       expression(0)(Span::new("foo < boo || far > baz")).unwrap().1.value,
-      Expr::sref(0, 0, "foo").op(4, 0, ast::Operator::LessThan,
-        Expr::sref(2, 0, "boo")
+      ExpressionBuilder::sref(0, 0, "foo").op(4, 0, ast::Operator::LessThan,
+        ExpressionBuilder::sref(2, 0, "boo")
       ).op(6, 0, ast::Operator::LogicalOr,
-        Expr::sref(3, 0, "far").op(4, 0, ast::Operator::GreaterThan,
-          Expr::sref(2, 0, "baz")
+        ExpressionBuilder::sref(3, 0, "far").op(4, 0, ast::Operator::GreaterThan,
+          ExpressionBuilder::sref(2, 0, "baz")
         )
       ).build()
     );
     assert_eq!(
       expression(0)(Span::new("offset == size(input.0) || input.0[offset] < '0' || input.0[offset] > '9'")).unwrap().1.value,
-      Expr::sref(0, 0, "offset").op(7, 0, ast::Operator::Equality,
-        Expr::fun(3, 0, "size", Expr::sref(5, 0, "input").tuple_ref(5, 0, 0))
+      ExpressionBuilder::sref(0, 0, "offset").op(7, 0, ast::Operator::Equality,
+        ExpressionBuilder::fun(3, 0, "size", ExpressionBuilder::sref(5, 0, "input").tuple_ref(5, 0, 0))
       ).op(17, 0, ast::Operator::LogicalOr, 
-        Expr::sref(3, 0, "input").tuple_ref(5, 0, 0).array_index(2, 0, Expr::sref(1, 0, "offset")).op(9, 0, ast::Operator::LessThan,
-          Expr::char(2, 0, '0')
+        ExpressionBuilder::sref(3, 0, "input").tuple_ref(5, 0, 0).array_index(2, 0, ExpressionBuilder::sref(1, 0, "offset")).op(9, 0, ast::Operator::LessThan,
+          ExpressionBuilder::char(2, 0, '0')
         )
       ).op(25, 0, ast::Operator::LogicalOr,
-        Expr::sref(3, 0, "input").tuple_ref(5, 0, 0).array_index(2, 0, Expr::sref(1, 0, "offset")).op(9, 0, ast::Operator::GreaterThan,
-          Expr::char(2, 0, '9')
+        ExpressionBuilder::sref(3, 0, "input").tuple_ref(5, 0, 0).array_index(2, 0, ExpressionBuilder::sref(1, 0, "offset")).op(9, 0, ast::Operator::GreaterThan,
+          ExpressionBuilder::char(2, 0, '9')
         )
       ).build()
     );

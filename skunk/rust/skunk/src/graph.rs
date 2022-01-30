@@ -201,6 +201,7 @@ impl Graph {
   }
 
   // Return any arrows matching (endpoint -> spec) or (spec -> endpoint).
+  #[allow(dead_code)]
   pub fn arrows_involving_endpoint(&self, endpoint: SimpleEndpoint, spec: EndpointSpec) -> Vec<&Arrow> {
     let mut lhs = self.arrows_matching(EndpointSpec::Specific(endpoint), spec);
     lhs.append(&mut self.arrows_matching(spec, EndpointSpec::Specific(endpoint)));

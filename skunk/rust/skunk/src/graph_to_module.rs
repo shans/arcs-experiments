@@ -194,7 +194,7 @@ impl <'a> ModuleContext<'a> {
 
     let mut all_handle_names = HashMap::<usize, Vec<String>>::new();
     for handle_info in &result {
-      if let WriteBehaviour::WritesToTupleHandle(_, _, u, n) = &handle_info.write_behaviour {
+      if let WriteBehaviour::WritesToTupleHandle(_, _, u, _) = &handle_info.write_behaviour {
         if !all_handle_names.contains_key(u) {
           all_handle_names.insert(*u, Vec::<String>::new());
         }

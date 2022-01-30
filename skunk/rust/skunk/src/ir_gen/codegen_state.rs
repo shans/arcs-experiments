@@ -112,39 +112,3 @@ impl <'a, 'ctx> CodegenStateConstructor<'ctx> for TargetInfo<'a> {
     CodegenState::new(context, self.target_machine, self.target_triple, name)
   }
 }
-
-pub mod tests {
-  use super::*;
-
-  use inkwell::execution_engine::{ExecutionEngine};
-  use inkwell::OptimizationLevel;
-
-  pub struct JitInfo<'ctx> {
-    pub execution_engine: Option<ExecutionEngine<'ctx>>,
-  }
-
-  impl <'ctx> JitInfo<'ctx> {
-    pub fn new() -> JitInfo<'ctx> {
-      JitInfo { execution_engine: None }
-    }
-  }
-
-  impl <'ctx> CodegenStateConstructor<'ctx> for JitInfo<'ctx> {
-    fn construct(&mut self, context: &'ctx Context, name: &str) -> CodegenState<'ctx> {
-      let module = context.create_module(name);
-      match &self.execution_engine {
-        None => {
-          self.execution_engine = Some(module.create_jit_execution_engine(OptimizationLevel::None).unwrap());
-        }
-        Some(execution_engine) => {
-          execution_engine.add_module(&module).unwrap();
-        }
-      }
-      let builder = context.create_builder();
-      let pass_manager_builder = PassManagerBuilder::create();
-      let function_pass_manager = PassManager::create(&module);
-      pass_manager_builder.populate_function_pass_manager(&function_pass_manager);
-      CodegenState { context, module, builder, function_pass_manager, locals: HashMap::new(), break_target: Vec::new(), considering: None, registered_strings: HashMap::new() }
-    }
-  }
-}

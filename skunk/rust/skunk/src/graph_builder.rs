@@ -56,6 +56,8 @@ pub fn add_graph_module_info(graph: &mut graph::Graph, info: &ast::GraphModuleIn
         todo!("can't add fields that aren't This.fields yet")
       }
     }
+    // This catch-all is useful to have when implementing new graph primitives.
+    #[allow(unreachable_patterns)]
     _ => todo!("can't add {:?} to a graph yet", info)
   }
 }
