@@ -453,7 +453,7 @@ mod tests {
   use super::super::super::target_triple_and_machine;
 
 
-  use super::super::super::parser::tests::expression_builder::Expr;
+  use super::super::super::parser::tests::expression_builder::ExpressionBuilder;
   use super::super::super::parser;
 
   pub fn test_module<'a>() -> ast::Module {
@@ -534,9 +534,9 @@ module ExpressionTypes {
     let context = Context::create();
     let (target_triple, target_machine) = target_triple_and_machine();
     let cg = CodegenState::new(&context, &target_machine, &target_triple, "InvalidModule");
-    let t = expression_type(&cg, module, &Expr::tuple(0, 0, vec!(Expr::sref(0, 0, "i_tuple").tuple_ref(0, 0, 0), Expr::sref(0, 0, "offset"))).build())?;
-    let u = expression_type(&cg, module, &Expr::sref(0, 0, "i_tuple").build())?;
-    let v = expression_type(&cg, module, &Expr::sref(0, 0, "i_tuple").tuple_ref(0, 0, 0).build())?;
+    let t = expression_type(&cg, module, &ExpressionBuilder::tuple(0, 0, vec!(ExpressionBuilder::sref(0, 0, "i_tuple").tuple_ref(0, 0, 0), ExpressionBuilder::sref(0, 0, "offset"))).build())?;
+    let u = expression_type(&cg, module, &ExpressionBuilder::sref(0, 0, "i_tuple").build())?;
+    let v = expression_type(&cg, module, &ExpressionBuilder::sref(0, 0, "i_tuple").tuple_ref(0, 0, 0).build())?;
     dbg!(t, u, v);
     Ok(())
   }
