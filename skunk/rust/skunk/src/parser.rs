@@ -457,13 +457,51 @@ fn graph(i: Span) -> ParseResult<ast::GraphDirective> {
   ))
 }
 
-fn use_statement(i: Span) -> ParseResult<ast::Use> {
-  let (input, name) = delimited(
-    tuple((tag("uses"), multispace1)),
-    uppercase_name,
-    tuple((multispace0, char(';')))
+fn use_component_simple(i: Span) -> ParseResult<ast::Use> {
+  let (i, name) = alt((name, uppercase_name))(i)?;
+  Ok((i, ast::Use { name: name.to_string(), children: vec!() }))
+}
+
+fn use_component_compound(i: Span) -> ParseResult<ast::Use> {
+  let (i, (mut component, children)) = tuple((
+    terminated(use_component_simple, tag("::")),
+    delimited(
+      tuple((char('{'), multispace0)), 
+      separated_list1(tuple((multispace0, char(','), multispace0)), use_component_recursive),
+      tuple((multispace0, char('}')))
+    ))
   )(i)?;
-  Ok((input, ast::Use { name: name.to_string() }))
+  component.children = children;
+  Ok((i, component))
+}
+
+fn use_component(i: Span) -> ParseResult<ast::Use> {
+  alt((use_component_compound, use_component_simple))(i)
+}
+
+fn use_component_recursive(i: Span) -> ParseResult<ast::Use> {
+  let (i, (mut component, rest)) = tuple((
+    use_component,
+    opt(preceded(tag("::"), use_component_recursive))
+  ))(i)?;
+  match rest {
+    None => Ok((i, component)),
+    Some (sub_use) => {
+      if component.children.len() > 0 {
+        panic!("Shouldn't be able to do 'uses foo::{}::far'. Ideally this would be a nom error.", "{bar}");
+      }
+      component.children = vec!(sub_use);
+      Ok((i, component))
+    }
+  }
+}
+
+fn use_statement(i: Span) -> ParseResult<ast::Use> {
+  delimited(
+    tuple((tag("uses"), multispace1)), 
+    use_component_recursive, 
+    tuple((multispace0, char(';')))
+  )(i)
 }
 
 fn newtype(i: Span) -> ParseResult<ast::NewType> {
@@ -697,6 +735,24 @@ pub mod tests {
     )
   }
   
+  #[test]
+  fn parse_simple_use_statement() {
+    let test_str = "uses simple;";
+    assert_eq!(
+      use_statement(Span::new(&test_str)).unwrap().1,
+      ast::Use { name: "simple".to_string(), children: vec!() }
+    )
+  }
+
+  #[test]
+  fn parse_compound_use_satement() {
+    let test_str = "uses simple::Thing;";
+    assert_eq!(
+      use_statement(Span::new(&test_str)).unwrap().1,
+      ast::Use { name: "simple".to_string(), children: vec!(ast::Use { name: "Thing".to_string(), children: vec!() }) }
+    )
+  }
+
   #[test]
   fn parse_graph_tuple() {
     let test_str = "(Module1, Module2)";

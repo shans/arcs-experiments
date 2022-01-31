@@ -468,6 +468,7 @@ pub enum GraphDirective {
 #[derive(Debug, PartialEq)]
 pub struct Use {
   pub name: String,
+  pub children: Vec<Use>,
 }
 
 #[derive(Debug, PartialEq, Clone)]

@@ -2,7 +2,7 @@ uses UnsignedInt;
 uses Spaces;
 uses Char;
 
-type Error = Int;
+uses definitions::Error;
 
 module Pair {
   input: reads (String, Int);

@@ -51,10 +51,13 @@ impl <'a> From<ir_gen::codegen_state::CodegenError> for SkunkError {
   }
 }
 
+#[derive(Default)]
 struct FileData {
   buffer: String,
-  ast: Vec<ast::TopLevel>,
+  ast: Vec<Rc<ast::TopLevel>>,
   main_module: Option<Rc<ast::Module>>,
+  module_map: HashMap<String, Rc<ast::Module>>,
+  newtype_map: HashMap<String, Rc<ast::NewType>>
 }
 
 
@@ -67,33 +70,39 @@ impl MainData {
     Self { file_info: RefCell::new(HashMap::new()) }
   }
   fn load_file(&self, location: &str) -> Result<(), SkunkError> {
-    let mut file_data = FileData::new();
+    let mut file_data = FileData::default();
     file_data.prepare(self, location)?;
     {
       self.file_info.borrow_mut().insert(location.to_string(), Rc::new(file_data));
     }
     Ok(())
   }
-  fn main_module_for_file(&self, location: &str) -> Option<Rc<ast::Module>> {
+  fn get_file_info(&self, location: &str) -> Rc<FileData> {
     let existing_data = {
       let file_info = self.file_info.borrow();
       file_info.get(location).map(|r| (*r).clone())
     };
     match existing_data {
       None => {
-        self.load_file(location).ok()?;
-        self.file_info.borrow().get(location).and_then(|file_info| (file_info.main_module.clone()))    
+        self.load_file(location).ok();
+        let file_info = self.file_info.borrow();
+        file_info.get(location).unwrap().clone()
       }
-      Some(info) => info.main_module.clone()
+      Some(info) => info.clone()
     }
+  }
+  fn main_module_for_file(&self, location: &str) -> Option<Rc<ast::Module>> {
+    self.get_file_info(location).main_module.clone()
+  }
+  fn named_module_from_file(&self, location: &str, name: &str) -> Option<Rc<ast::Module>> {
+    self.get_file_info(location).module_map.get(name).map(|rc| rc.clone())
+  }
+  fn named_newtype_from_file(&self, location: &str, name: &str) -> Option<Rc<ast::NewType>> {
+    self.get_file_info(location).newtype_map.get(name).map(|rc| rc.clone())
   }
 }
 
 impl FileData {
-  fn new() -> Self {
-    Self { ast: Vec::new(), main_module: None, buffer: String::new() }
-  }
-
   fn prepare(&mut self, main_data: &MainData, location: &str) -> Result<(), SkunkError> {
     dbg!(location);
     let slash = location.rfind("/");
@@ -120,14 +129,30 @@ impl FileData {
   
     let dependencies = ast::uses(&ast);
     let mut processed_modules = Vec::new();
+    let mut newtypes: Vec<ast::NewType> = ast::newtypes(&ast).drain(..).cloned().collect();
+
     for dependency in dependencies {
       // TODO: Absolute paths, imports from other places, etc. etc.
       let file_name = format!("{}{}.skunk", prefix, dependency.name);
-      let module = main_data.main_module_for_file(&file_name).ok_or(SkunkError::FileNotFound(file_name.clone()))?;
-      processed_modules.push(module);
+      if dependency.children.is_empty() {
+        let module = main_data.main_module_for_file(&file_name).ok_or(SkunkError::FileNotFound(file_name.clone()))?;
+        processed_modules.push(module);
+      } else {
+        // TODO: handle compound children
+        for child in &dependency.children {
+          if !child.children.is_empty() {
+            panic!("Don't know how to deal loading compound children yet");
+          }
+          let module = main_data.named_module_from_file(&file_name, &child.name);
+          if let Some(module) = module {
+            processed_modules.push(module);
+          } else {
+            let newtype = main_data.named_newtype_from_file(&file_name, &child.name).unwrap();
+            newtypes.push(newtype.as_ref().clone()); 
+          }
+        }
+      }
     }
-
-    let newtypes = ast::newtypes(&ast).iter().map(|a| (*a).clone()).collect();
 
     { 
       let mut modules = ast::modules_mut(&mut ast);
@@ -143,14 +168,13 @@ impl FileData {
         processed_modules.push(Rc::new(modules[i].clone()))
       }
     }
-    self.ast = ast;
-    let ast_graphs = ast::graphs(&self.ast);
+    let ast_graphs = ast::graphs(&ast);
     let processed_refs = processed_modules.iter().map(|r| r.as_ref()).collect();
 
     // TODO: Instead of duplicating graph processing logic, push the main module onto the end of the mutable modules list and
     // deal with it in the same pass as the rest.
     if ast_graphs.len() > 0 {
-      let mut graph = graph_builder::make_graph(ast::graphs(&self.ast));
+      let mut graph = graph_builder::make_graph(ast::graphs(&ast));
       let mut main = ast::Module::create("Main", Vec::new(), Vec::new(), Vec::new(), ast::Examples { examples: Vec::new() }, Vec::new(), Vec::new());
 
       graph_builder::resolve_graph(&main, &processed_refs, &mut graph)?;
@@ -172,6 +196,15 @@ impl FileData {
       dbg!(&module_name);
       self.main_module = processed_refs.iter().find(|module| module.name == module_name).map(|module| Rc::new((*module).clone()))
     }
+
+    for toplevel in ast {
+      match toplevel {
+        ast::TopLevel::Module(m) => { self.module_map.insert(m.name.to_string(), Rc::new(m)); },
+        ast::TopLevel::NewType(t) => { self.newtype_map.insert(t.name.to_string(), Rc::new(t)); },
+        _ => self.ast.push(Rc::new(toplevel))
+      }
+    }
+
     Ok(())
   }
 }
