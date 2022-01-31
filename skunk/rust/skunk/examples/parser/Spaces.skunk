@@ -1,4 +1,4 @@
-type Error = Int;
+uses definitions::Error;
 
 module Spaces {
   input: reads (String, Int);

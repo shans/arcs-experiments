@@ -1,4 +1,4 @@
-type Error = Int;
+uses definitions::Error;
 
 module UnsignedInt {
   input: reads (String, Int);

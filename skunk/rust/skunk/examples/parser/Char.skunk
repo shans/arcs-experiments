@@ -1,7 +1,7 @@
 uses UnsignedInt;
 uses Spaces;
 
-type Error = Int;
+uses definitions::Error;
 
 module Char<char: Char> {
   input: reads (String, Int);
