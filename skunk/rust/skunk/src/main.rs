@@ -51,6 +51,7 @@ impl <'a> From<ir_gen::codegen_state::CodegenError> for SkunkError {
   }
 }
 
+#[derive(Default)]
 struct FileData {
   buffer: String,
   ast: Vec<Rc<ast::TopLevel>>,
@@ -69,7 +70,7 @@ impl MainData {
     Self { file_info: RefCell::new(HashMap::new()) }
   }
   fn load_file(&self, location: &str) -> Result<(), SkunkError> {
-    let mut file_data = FileData::new();
+    let mut file_data = FileData::default();
     file_data.prepare(self, location)?;
     {
       self.file_info.borrow_mut().insert(location.to_string(), Rc::new(file_data));
@@ -102,10 +103,6 @@ impl MainData {
 }
 
 impl FileData {
-  fn new() -> Self {
-    Self { ast: Vec::new(), main_module: None, buffer: String::new(), module_map: HashMap::new(), newtype_map: HashMap::new() }
-  }
-
   fn prepare(&mut self, main_data: &MainData, location: &str) -> Result<(), SkunkError> {
     dbg!(location);
     let slash = location.rfind("/");
@@ -132,18 +129,18 @@ impl FileData {
   
     let dependencies = ast::uses(&ast);
     let mut processed_modules = Vec::new();
-    let mut newtypes: Vec<ast::NewType> = ast::newtypes(&ast).iter().map(|a| (*a).clone()).collect();
+    let mut newtypes: Vec<ast::NewType> = ast::newtypes(&ast).drain(..).cloned().collect();
 
     for dependency in dependencies {
       // TODO: Absolute paths, imports from other places, etc. etc.
       let file_name = format!("{}{}.skunk", prefix, dependency.name);
-      if dependency.children.len() == 0 {
+      if dependency.children.is_empty() {
         let module = main_data.main_module_for_file(&file_name).ok_or(SkunkError::FileNotFound(file_name.clone()))?;
         processed_modules.push(module);
       } else {
         // TODO: handle compound children
         for child in &dependency.children {
-          if child.children.len() > 0 {
+          if !child.children.is_empty() {
             panic!("Don't know how to deal loading compound children yet");
           }
           let module = main_data.named_module_from_file(&file_name, &child.name);
