@@ -276,11 +276,11 @@ pub fn main_for_examples<'ctx>(context: &'ctx Context, target_machine: &TargetMa
 
   for submodule in modules {
     let name = submodule.get_name().to_str().unwrap().to_string();
-    let fn_name = name.clone() + "_run_examples";
+    let fn_name = format!("{}_run_examples", name);
     if let Some(sub_fn) = submodule.get_function(&fn_name) {
       let sub_fn = cg.module.add_function(&fn_name, sub_fn.get_type(), None);
       let result = cg.builder.build_call(sub_fn, &[], "result").try_as_basic_value().left().unwrap().into_int_value();
-      let bad_result = context.append_basic_block(function, &(fn_name.clone() + "_bad"));
+      let bad_result = context.append_basic_block(function, &format!("{}_bad", fn_name));
       let next = context.append_basic_block(function, &(fn_name + "_next"));
 
       let test = cg.builder.build_int_compare(IntPredicate::EQ, result, context.i64_type().const_zero(), "test");
@@ -291,8 +291,7 @@ pub fn main_for_examples<'ctx>(context: &'ctx Context, target_machine: &TargetMa
       
       cg.builder.position_at_end(next);
 
-      let example_count_name = name.clone() + "__get_example_count";
-      let example_count_fn = submodule.get_function(&example_count_name).unwrap();
+      let example_count_fn = submodule.get_function(&format!("{}__get_example_count", name)).unwrap();
       let count = cg.builder.build_call(example_count_fn, &[], "count").try_as_basic_value().left().unwrap().into_int_value();
       printf(&mut cg, &(name + ": %d examples succeeded\n"), vec!(count.into()));
     }
