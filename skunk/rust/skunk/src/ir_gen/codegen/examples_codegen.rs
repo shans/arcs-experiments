@@ -263,16 +263,20 @@ pub fn example_check_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx as
   Ok(function)
 }
 
+// A main function for examples. This runs all examples in all provided modules. Note that it doesn't take
+// a CodegenState because generating this isn't part of the main codegen flow - instead, it's an optional
+// extra triggered from main.rs.
 pub fn main_for_examples<'ctx>(context: &'ctx Context, target_machine: &TargetMachine, target_triple: &TargetTriple, modules: &Vec<Module<'ctx>>) -> CodegenResult<Module<'ctx>> {
 
-  let cg = CodegenState::new(context, target_machine, target_triple, "main");
+  let mut cg = CodegenState::new(context, target_machine, target_triple, "main");
   let function = cg.module.add_function("main", context.i32_type().fn_type(&[], false), None);
 
   let entry = cg.context.append_basic_block(function, "entry");
   cg.builder.position_at_end(entry);
 
   for submodule in modules {
-    let fn_name = submodule.get_name().to_str().unwrap().to_string() + "_run_examples";
+    let name = submodule.get_name().to_str().unwrap().to_string();
+    let fn_name = name.clone() + "_run_examples";
     if let Some(sub_fn) = submodule.get_function(&fn_name) {
       let sub_fn = cg.module.add_function(&fn_name, sub_fn.get_type(), None);
       let result = cg.builder.build_call(sub_fn, &[], "result").try_as_basic_value().left().unwrap().into_int_value();
@@ -286,6 +290,11 @@ pub fn main_for_examples<'ctx>(context: &'ctx Context, target_machine: &TargetMa
       cg.builder.build_return(Some(&context.i32_type().const_int(-(1 as i32) as u64, true)));
       
       cg.builder.position_at_end(next);
+
+      let example_count_name = name.clone() + "__get_example_count";
+      let example_count_fn = submodule.get_function(&example_count_name).unwrap();
+      let count = cg.builder.build_call(example_count_fn, &[], "count").try_as_basic_value().left().unwrap().into_int_value();
+      printf(&mut cg, &(name + ": %d examples succeeded\n"), vec!(count.into()));
     }
   }
 

@@ -63,6 +63,14 @@ pub fn get_vsnprintf<'ctx>(cg: &mut CodegenState<'ctx>) -> FunctionValue<'ctx> {
   }).unwrap()
 }
 
+pub fn printf<'ctx>(cg: &mut CodegenState<'ctx>, fmt: &str, args: Vec<BasicValueEnum<'ctx>>) {
+  let printf = get_printf(cg);
+  let fmt_str = cg.global_string(fmt);
+  let mut arg_array = vec![fmt_str.into()];
+  arg_array.extend_from_slice(&args[..]);
+  cg.builder.build_call(printf, &arg_array[..], "_");
+}
+
 pub fn get_printf<'ctx>(cg: &CodegenState<'ctx>) -> FunctionValue<'ctx> {
   cg.module.get_function("printf").or_else(|| {
     let function_type = cg.context.i32_type().fn_type(&[cg.char_ptr_type().into()], true);
