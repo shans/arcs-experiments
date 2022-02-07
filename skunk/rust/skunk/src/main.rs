@@ -17,11 +17,14 @@ use std::fs::File;
 use std::io::{prelude::*, stdout, stderr};
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use std::process::Command;
 
 use std::cell::RefCell;
 use std::rc::Rc;
+
+use walkdir::WalkDir;
 
 #[derive(Debug)]
 enum SkunkError {
@@ -31,6 +34,7 @@ enum SkunkError {
   GraphBuilderError(graph_builder::GraphBuilderError),
   GraphToModuleError(graph_to_module::GraphToModuleError),
   CodegenError(ir_gen::codegen_state::CodegenError),
+  WalkDirError(walkdir::Error),
 }
 
 impl From<graph_builder::GraphBuilderError> for SkunkError {
@@ -48,6 +52,12 @@ impl <'a> From<graph_to_module::GraphToModuleError> for SkunkError {
 impl <'a> From<ir_gen::codegen_state::CodegenError> for SkunkError {
   fn from(item: ir_gen::codegen_state::CodegenError) -> SkunkError {
     SkunkError::CodegenError(item)
+  }
+}
+
+impl <'a> From<walkdir::Error> for SkunkError {
+  fn from(item: walkdir::Error) -> SkunkError {
+    SkunkError::WalkDirError(item)
   }
 }
 
@@ -92,6 +102,7 @@ impl MainData {
     }
   }
   fn main_module_for_file(&self, location: &str) -> Option<Rc<ast::Module>> {
+    dbg!(format!("Getting main module for {}", location));
     self.get_file_info(location).main_module.clone()
   }
   fn named_module_from_file(&self, location: &str, name: &str) -> Option<Rc<ast::Module>> {
@@ -242,6 +253,11 @@ fn main() {
         let mut main_data = MainData::new();
         build_test_examples(&mut main_data, file).unwrap();
       },
+    Some("all-examples") => {
+      let location = &env::args().nth(2).expect("missing example path");
+      let mut main_data = MainData::new();
+      build_all_test_examples(&mut main_data, location).unwrap();
+    },
     Some(command) => panic!("Unknown command '{}'", command),
   }
 }
@@ -256,6 +272,72 @@ fn target_triple_and_machine() -> (TargetTriple, TargetMachine) {
   let target = Target::from_triple(&target_triple).unwrap();
   let target_machine = target.create_target_machine(&target_triple, "generic", "", OptimizationLevel::Default, RelocMode::Default, CodeModel::Default).unwrap();
   (target_triple, target_machine)
+}
+
+fn build_all_test_examples(main_data:&mut MainData, location: &str) -> Result<(), SkunkError> {
+  let (target_triple, target_machine) = target_triple_and_machine();
+  let mut target_info = ir_gen::codegen_state::TargetInfo { target_machine: &target_machine, target_triple: &target_triple };
+  let context = Context::create();
+  
+  let mut objects: HashSet<String> = HashSet::new();
+  let mut deduped_modules: Vec<&inkwell::module::Module> = Vec::new();
+ 
+  let mut main_modules: Vec<Rc<ast::Module>> = Vec::new();
+  let mut cg_modules_list: Vec<Vec<inkwell::module::Module>> = Vec::new();
+
+  for maybe_entry in WalkDir::new(location) {
+    let entry = maybe_entry?;
+    if entry.file_type().is_dir() {
+      continue;
+    }
+    let path_str = entry.path().to_str().unwrap();
+
+    if !path_str.ends_with(".skunk") {
+      continue;
+    }
+
+    main_data.load_file(path_str)?;
+    if let Some(main_module) = main_data.main_module_for_file(path_str) {
+      main_modules.push(main_module);
+    }
+  }
+
+  for main_module in &main_modules {
+    let cg_modules = ir_gen::codegen(&context, &mut target_info, main_module)?;
+    cg_modules_list.push(cg_modules);
+  }
+
+  for cg_modules in &cg_modules_list {
+    for module in cg_modules {
+      let name = module.get_name().to_str().unwrap();
+      let object_name = name.to_string() + ".o";
+      if objects.contains(&object_name) {
+        continue;
+      }
+      let path = Path::new(&object_name);
+      target_machine.write_to_file(&module, FileType::Object, path).unwrap();
+      objects.insert(object_name);
+      deduped_modules.push(&module);
+    }
+  }
+
+  let example_module = ir_gen::main_for_examples(&context, &target_machine, &target_triple, &deduped_modules)?;
+  let object_name = "main.o";
+  let path = Path::new(&object_name);
+  target_machine.write_to_file(&example_module, FileType::Object, path).unwrap();
+  objects.insert(object_name.to_string());
+
+  let mut command = Command::new("clang");
+  let mut cmd = command.arg("-o").arg(&format!("{}/all_examples", location));
+  for object in objects {
+    cmd = cmd.arg(object);
+  }
+
+  let output = cmd.arg("-lc").output().expect("failed to run clang");
+  stdout().write_all(&output.stdout).unwrap();
+  stderr().write_all(&output.stderr).unwrap();
+
+  Ok(())
 }
 
 fn build_test_examples(main_data: &mut MainData, location: &str) -> Result<(), SkunkError> {
@@ -280,7 +362,7 @@ fn build_test_examples(main_data: &mut MainData, location: &str) -> Result<(), S
     objects.push(object_name);
   }
 
-  let main_module = ir_gen::main_for_examples(&context, &target_machine, &target_triple, &cg_modules)?;
+  let main_module = ir_gen::main_for_examples(&context, &target_machine, &target_triple, &cg_modules.iter().collect())?;
   let object_name = "main.o";
   let path = Path::new(&object_name);
   target_machine.write_to_file(&main_module, FileType::Object, path).unwrap();
@@ -298,4 +380,20 @@ fn build_test_examples(main_data: &mut MainData, location: &str) -> Result<(), S
   stderr().write_all(&output.stderr).unwrap();
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn run_parser_examples() {
+    let mut main_data = MainData::new();
+    build_all_test_examples(&mut main_data, "./examples/parser").unwrap();
+    let output = Command::new("./examples/parser/all_examples").output().expect("Could not run parser tests");
+    stdout().write_all(&output.stdout).unwrap();
+    stderr().write_all(&output.stderr).unwrap();
+    assert!(output.status.success());
+  }
+
 }
