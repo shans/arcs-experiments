@@ -266,7 +266,7 @@ pub fn example_check_codegen<'ctx>(cg: &mut CodegenState<'ctx>, module: &'ctx as
 // A main function for examples. This runs all examples in all provided modules. Note that it doesn't take
 // a CodegenState because generating this isn't part of the main codegen flow - instead, it's an optional
 // extra triggered from main.rs.
-pub fn main_for_examples<'ctx>(context: &'ctx Context, target_machine: &TargetMachine, target_triple: &TargetTriple, modules: &Vec<Module<'ctx>>) -> CodegenResult<Module<'ctx>> {
+pub fn main_for_examples<'ctx>(context: &'ctx Context, target_machine: &TargetMachine, target_triple: &TargetTriple, modules: &Vec<&Module<'ctx>>) -> CodegenResult<Module<'ctx>> {
 
   let mut cg = CodegenState::new(context, target_machine, target_triple, "main");
   let function = cg.module.add_function("main", context.i32_type().fn_type(&[], false), None);
