@@ -102,7 +102,7 @@ impl MainData {
     }
   }
   fn main_module_for_file(&self, location: &str) -> Option<Rc<ast::Module>> {
-    dbg!(format!("Getting main module for {}", location));
+    eprintln!("Getting main module for {}", location);
     self.get_file_info(location).main_module.clone()
   }
   fn named_module_from_file(&self, location: &str, name: &str) -> Option<Rc<ast::Module>> {
@@ -204,7 +204,6 @@ impl FileData {
         Some(pos) => location.split_at(pos + 1).1,
       };
       let module_name = module_name.strip_suffix(".skunk").unwrap();
-      dbg!(&module_name);
       self.main_module = processed_refs.iter().find(|module| module.name == module_name).map(|module| Rc::new((*module).clone()))
     }
 
