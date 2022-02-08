@@ -1,0 +1,46 @@
+name: Skunk
+
+on: [push]
+
+defaults:
+  run:
+    working-directory: ./skunk/rust/skunk
+
+jobs:
+  test:
+    name: Test using ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+    - uses: actions/checkout@v1
+    - uses: actions/cache@v2
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Run tests
+      run: cargo test --locked --release --verbose
+    - name: Run ignored tests
+      run: cargo test --locked --release --verbose -- --ignored
+
+  build:
+    name: Build using ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+    - uses: actions/checkout@v1
+    - uses: actions/cache@v2
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build
+      run: cargo build --locked --release --verbose
